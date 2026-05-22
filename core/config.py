@@ -14,9 +14,10 @@ IMAGE_DIR = os.path.join(OUTPUT_DIR, "images")
 
 # 2. LLM Engine Configurations
 USE_LLM = False  # Set to True to enable the Agno LLM Engine
-LLM_PROVIDER = "openai"  # "openai", "anthropic", etc.
-LLM_MODEL = "gpt-4o"
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+LLM_PROVIDER = "google"      # Options: "openai", "google", "anthropic"
+LLM_MODEL = "gemini-2.0-flash"  # Recommended Gemini model (fast + structured output)
+GOOGLE_API_KEY  = os.getenv("GOOGLE_API_KEY", "")
+OPENAI_API_KEY  = os.getenv("OPENAI_API_KEY", "")  # Keep for compatibility
 
 # 3. Ensure Directories Exist
 os.makedirs(OUTPUT_DIR, exist_ok=True)

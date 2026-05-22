@@ -3,138 +3,166 @@ from typing import List, Optional, Literal
 from pydantic import BaseModel, Field
 
 from agno.agent import Agent
-from agno.models.openai import OpenAIChat
-from core.config import get_logger, LLM_MODEL, OPENAI_API_KEY
+from core.config import get_logger, LLM_MODEL, LLM_PROVIDER, GOOGLE_API_KEY, OPENAI_API_KEY
 
 logger = get_logger("llm_engine")
 
 # =====================================================================
-# Modèles Pydantic v2 conformes au Cahier des Spécifications
+# Modeles Pydantic v2 conformes au Cahier des Specifications
 # =====================================================================
 
 class SubProposition(BaseModel):
-    id: int = Field(description="Identifiant numérique de la sous-proposition (ex: 1, 2, 3, 4).")
+    id: int = Field(description="Identifiant numerique de la sous-proposition (ex: 1, 2, 3, 4).")
     text: str = Field(description="Contenu scientifique de l'affirmation.")
     is_true: Optional[bool] = Field(
-        default=None, 
-        description="Si déductible, indique si cette sous-proposition spécifique est scientifiquement vraie ou fausse."
+        default=None,
+        description="Si deductible, indique si cette sous-proposition specifique est scientifiquement vraie ou fausse."
     )
 
 class Option(BaseModel):
     letter: Literal["A", "B", "C", "D", "E"] = Field(description="Lettre de l'option (A, B, C, D ou E).")
-    text: str = Field(description="Contenu textuel de la proposition de réponse (ex: '1 + 3' ou 'Pneumonie à pneumocoque').")
-    is_correct: bool = Field(description="Indique si cette option de réponse finale est correcte (True) ou non (False).")
+    text: str = Field(description="Contenu textuel de la proposition de reponse (ex: '1 + 3' ou 'Pneumonie a pneumocoque').")
+    is_correct: bool = Field(description="Indique si cette option de reponse finale est correcte (True) ou non (False).")
 
 class Correction(BaseModel):
     answer_letter: str = Field(description="La ou les lettres correctes de correction (ex: 'B' ou 'A, C').")
-    comment: Optional[str] = Field(default=None, description="Explication et justification médicale détaillée de la correction.")
+    comment: Optional[str] = Field(default=None, description="Explication et justification medicale detaillee de la correction.")
     correction_images: List[str] = Field(
-        default_factory=list, 
-        description="Liste des placeholders d'images [[IMG_...]] associés à la justification de correction."
+        default_factory=list,
+        description="Liste des placeholders d'images [[IMG_...]] associes a la justification de correction."
     )
 
 class CaseStudy(BaseModel):
     case_id: str = Field(description="Hash ou ID unique identifiant le dossier clinique.")
-    case_title: str = Field(description="Titre ou numéro du dossier (ex: 'Dossier 03' ou 'Cas clinique 2').")
-    context_text: str = Field(description="Texte complet de l'énoncé clinique de base.")
+    case_title: str = Field(description="Titre ou numero du dossier (ex: 'Dossier 03' ou 'Cas clinique 2').")
+    context_text: str = Field(description="Texte complet de l'enonce clinique de base.")
 
 class MedExtractQuestion(BaseModel):
-    source_file: str = Field(description="Nom du fichier source ayant servi à l'extraction.")
-    category: str = Field(description="Discipline médicale ou spécialité (ex: Cardiologie, Pneumologie).")
+    source_file: str = Field(description="Nom du fichier source ayant servi a l'extraction.")
+    category: str = Field(description="Discipline medicale ou specialite (ex: Cardiologie, Pneumologie).")
     case_study: Optional[CaseStudy] = Field(
-        default=None, 
+        default=None,
         description="Informations sur le cas clinique parent si applicable, sinon null."
     )
     context: Optional[str] = Field(
-        default=None, 
-        description="Énoncé clinique ou contexte direct de la question (identique au context_text du cas clinique)."
+        default=None,
+        description="Enonce clinique ou contexte direct de la question (identique au context_text du cas clinique)."
     )
-    question_number: int = Field(description="Numéro d'ordre de la question dans le document source.")
+    question_number: int = Field(description="Numero d'ordre de la question dans le document source.")
     question_type: Literal["SINGLE_CHOICE", "MULTIPLE_CHOICE", "K_TYPE"] = Field(
-        description="Type de question : SINGLE_CHOICE (Choix unique), MULTIPLE_CHOICE (Choix multiples standard), ou K_TYPE (Affirmations combinées)."
+        description="Type de question : SINGLE_CHOICE, MULTIPLE_CHOICE, ou K_TYPE (affirmations combinees)."
     )
-    instruction: str = Field(description="Énoncé direct de la question ou consigne posée.")
+    instruction: str = Field(description="Enonce direct de la question ou consigne posee.")
     logic_type: Literal["POSITIVE", "NEGATIVE"] = Field(
-        description="POSITIVE si on recherche les réponses VRAIES (RJ), NEGATIVE si on recherche la réponse FAUSSE/l'intrus (RF)."
+        description="POSITIVE si on recherche les reponses VRAIES (RJ), NEGATIVE si on recherche la reponse FAUSSE/l'intrus (RF)."
     )
-    has_image: bool = Field(description="Indique si l'énoncé contient au moins une image.")
+    has_image: bool = Field(description="Indique si l'enonce contient au moins une image.")
     question_images: List[str] = Field(
-        default_factory=list, 
-        description="Liste des placeholders d'images [[IMG_...]] présents dans l'énoncé."
+        default_factory=list,
+        description="Liste des placeholders d'images [[IMG_...]] presents dans l'enonce."
     )
     sub_propositions: List[SubProposition] = Field(
-        default_factory=list, 
-        description="Affirmations numérotées de base (utilisé principalement pour les K-Type, laisser vide pour les QCM classiques)."
+        default_factory=list,
+        description="Affirmations numerotees de base (principalement pour les K-Type)."
     )
     options: List[Option] = Field(
-        description="Les 5 propositions finales de réponses (A, B, C, D, E) proposées à l'étudiant."
+        description="Les 5 propositions finales de reponses (A, B, C, D, E) proposees a l'etudiant."
     )
-    correction: Correction = Field(description="Données de correction et explications.")
+    correction: Correction = Field(description="Donnees de correction et explications.")
 
 class QCMBatchResponse(BaseModel):
-    """Conteneur pour forcer l'Agent Agno à retourner une liste d'objets MedExtractQuestion."""
+    """Conteneur pour forcer l'Agent Agno a retourner une liste d'objets MedExtractQuestion."""
     questions: List[MedExtractQuestion]
 
 # =====================================================================
-# Initialisation de l'Agent Agno
+# Fabrique de modele LLM (agnostique du fournisseur)
+# =====================================================================
+
+def _build_model():
+    """
+    Construit et retourne le modele LLM Agno en fonction de LLM_PROVIDER.
+    Supporte : 'google' (Gemini), 'openai' (GPT).
+    """
+    provider = LLM_PROVIDER.lower()
+
+    if provider == "google":
+        from agno.models.google import Gemini
+        if not GOOGLE_API_KEY:
+            raise ValueError(
+                "La variable GOOGLE_API_KEY est manquante. "
+                "Ajoutez GOOGLE_API_KEY=votre_cle dans le fichier '.env'."
+            )
+        logger.info(f"Fournisseur LLM : Google Gemini ({LLM_MODEL})")
+        return Gemini(id=LLM_MODEL, api_key=GOOGLE_API_KEY)
+
+    elif provider == "openai":
+        from agno.models.openai import OpenAIChat
+        if not OPENAI_API_KEY:
+            raise ValueError(
+                "La variable OPENAI_API_KEY est manquante. "
+                "Ajoutez OPENAI_API_KEY=votre_cle dans le fichier '.env'."
+            )
+        logger.info(f"Fournisseur LLM : OpenAI ({LLM_MODEL})")
+        return OpenAIChat(id=LLM_MODEL, api_key=OPENAI_API_KEY)
+
+    else:
+        raise ValueError(
+            f"Fournisseur LLM non supporte : '{LLM_PROVIDER}'. "
+            "Valeurs valides : 'google', 'openai'."
+        )
+
+# =====================================================================
+# Initialisation de l'Agent Agno (singleton)
 # =====================================================================
 
 _structuring_agent: Optional[Agent] = None
 
 def get_structuring_agent() -> Agent:
     """
-    Retourne l'Agent Agno singleton configuré pour la structuration de QCM médicaux.
+    Retourne l'Agent Agno singleton configure pour la structuration de QCM medicaux.
+    Le modele utilise est determine par LLM_PROVIDER dans core/config.py.
     """
     global _structuring_agent
     if _structuring_agent is not None:
         return _structuring_agent
-        
-    if not OPENAI_API_KEY or "your_openai_api_key" in OPENAI_API_KEY:
-        raise ValueError(
-            "La variable OPENAI_API_KEY est manquante ou non valide. "
-            "Veuillez configurer votre clé réelle dans le fichier '.env' à la racine."
-        )
-        
-    logger.info(f"Initialisation de l'Agent Agno de Structuration (Modèle : {LLM_MODEL})...")
-    
-    # Configuration du modèle de chat OpenAI avec la clé d'API
-    model = OpenAIChat(id=LLM_MODEL, api_key=OPENAI_API_KEY)
-    
+
+    model = _build_model()
+
     _structuring_agent = Agent(
         model=model,
-        description="Vous êtes un médecin enseignant et un expert en structuration de bases de données médicales francophones (EDN / Résidanat).",
+        description="Vous etes un medecin enseignant et un expert en structuration de bases de donnees medicales francophones (EDN / Residanat).",
         instructions=[
             "1. LOGIQUE DE QUESTION (logic_type) :",
-            "   - Vous devez catégoriser chaque question en logic_type = 'POSITIVE' (Réponse Juste - RJ) ou 'NEGATIVE' (Réponse Fausse - RF).",
-            "   - Le type 'NEGATIVE' s'applique dès que la consigne recherche l'intruse, l'affirmation incorrecte, ou exclut un diagnostic.",
-            "   - Mots-clés indicateurs : 'fausse', 'sauf', 'incorrecte', 'à l'exclusion de', 'éliminer', 'ne fait pas partie'.",
-            "   - Soyez vigilant face aux formulations négatives multiples.",
+            "   - Categorizez chaque question en logic_type = 'POSITIVE' (Reponse Juste - RJ) ou 'NEGATIVE' (Reponse Fausse - RF).",
+            "   - Le type 'NEGATIVE' s'applique des que la consigne recherche l'intruse, l'affirmation incorrecte, ou exclut un diagnostic.",
+            "   - Mots-cles indicateurs : 'fausse', 'sauf', 'incorrecte', 'a l'exclusion de', 'eliminer', 'ne fait pas partie'.",
             "",
             "2. STRUCTURES COMPLEXES (K-TYPE) :",
-            "   - Si le texte liste des affirmations numérotées (1, 2, 3, 4) suivies d'options de combinaisons (A=1+2, B=2+3...),",
+            "   - Si le texte liste des affirmations numerotees (1, 2, 3, 4) suivies d'options de combinaisons (A=1+2, B=2+3...),",
             "     renseignez ces affirmations dans 'sub_propositions'.",
-            "   - Déduisez et marquez la véracité de chaque sous-proposition ('is_true': true/false) à partir de la correction fournie.",
-            "   - Pour les QCM directs (A, B, C, D, E sans affirmations intermédiaires), laissez 'sub_propositions' vide.",
+            "   - Deduisez et marquez la veracite de chaque sous-proposition ('is_true': true/false) via la correction fournie.",
+            "   - Pour les QCM directs (A, B, C, D, E sans affirmations intermediaires), laissez 'sub_propositions' vide.",
             "",
-            "3. PROTECTION ET ANCRAGE DES PLACEHOLDERS D'IMAGES :",
-            "   - Le texte source contient des placeholders d'images de type [[IMG_xxxx_Qxx]] ou [[IMG_xxxx_Pxx_Ixx]].",
-            "   - Vous devez les laisser EXACTEMENT intacts et inchangés dans le texte du 'context_text', 'context' ou 'instruction'.",
-            "   - Listez ces placeholders exacts dans 'question_images' (ou 'correction_images' s'ils apparaissent dans la justification).",
-            "   - Positionnez le booléen 'has_image' à True si au moins un placeholder d'image est présent.",
+            "3. PROTECTION DES PLACEHOLDERS D'IMAGES :",
+            "   - Conservez EXACTEMENT et sans modification les placeholders [[IMG_xxxx_Qxx]] ou [[IMG_xxxx_Pxx_Ixx]].",
+            "   - Listez-les dans 'question_images' ou 'correction_images' selon leur emplacement.",
+            "   - Positionnez 'has_image' a True si au moins un placeholder est present.",
             "",
             "4. CONSERVATION DES NOTATIONS SCIENTIFIQUES :",
-            "   - Conservez les formules de gaz du sang (PaO2, PaCO2), de clairance, les abréviations, unités (mmHg, g/L) et symboles (\\uparrow, \\downarrow, \\pm) en LaTeX ou Unicode.",
+            "   - Conservez les formules (PaO2, PaCO2), unites (mmHg, g/L) et symboles LaTeX/Unicode exactement.",
             "",
-            "5. INTÉGRITÉ DE LA CORRECTION :",
-            "   - Remplissez le champ 'correction.comment' avec la justification clinique complète en français. Conservez sa richesse.",
-            "   - Assurez-vous d'une concordance absolue à 100% entre 'correction.answer_letter' (ex: 'B' ou 'A, C') et le drapeau 'is_correct' de chaque option du tableau 'options'."
+            "5. INTEGRITE DE LA CORRECTION :",
+            "   - Remplissez 'correction.comment' avec la justification clinique complete en francais.",
+            "   - Assurez une concordance absolue entre 'correction.answer_letter' et le drapeau 'is_correct' de chaque option."
         ],
         response_format=QCMBatchResponse,
         temperature=0.0,
         markdown=False
     )
-    
+
+    logger.info(f"Agent Agno initialise avec succes (provider={LLM_PROVIDER}, model={LLM_MODEL}).")
     return _structuring_agent
+
 
 # =====================================================================
 # Exécuteur de requêtes IA

@@ -1,6 +1,10 @@
 import os
 import logging
 import re
+from dotenv import load_dotenv
+
+# Load environmental variables from .env file at the project root
+load_dotenv()
 
 # 1. Base Directory Configurations
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -8,7 +12,13 @@ INPUT_DIR = os.path.join(BASE_DIR, "QCM Medicale")
 OUTPUT_DIR = os.path.join(BASE_DIR, "output")
 IMAGE_DIR = os.path.join(OUTPUT_DIR, "images")
 
-# 2. Ensure Directories Exist
+# 2. LLM Engine Configurations
+USE_LLM = False  # Set to True to enable the Agno LLM Engine
+LLM_PROVIDER = "openai"  # "openai", "anthropic", etc.
+LLM_MODEL = "gpt-4o"
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+
+# 3. Ensure Directories Exist
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 os.makedirs(IMAGE_DIR, exist_ok=True)
 

@@ -645,3 +645,35 @@ def parse_pdf_to_qcm(pdf_path, category):
                     q["question_images"].append(f"{placeholder}.png")
                     
     return questions
+
+
+def extract_pdf_raw_paragraphs(pdf_path: str) -> list:
+    """
+    Extracts a flat list of raw text paragraphs from a PDF file for use by
+    the LLM pipeline (Epic 02). Image extraction and [[IMG_...]] placeholder
+    injection are handled by the existing extract_pdf_media_and_text() function.
+
+    Args:
+        pdf_path: Absolute path to the .pdf file.
+
+    Returns:
+        List of non-empty cleaned text line strings.
+    """
+    filename = os.path.basename(pdf_path)
+
+    # Reuse the existing physical extraction (images + spatial anchoring)
+    raw_full_text = extract_pdf_media_and_text(pdf_path)
+
+    if not raw_full_text:
+        return []
+
+    paragraphs_out = []
+    for line in raw_full_text.split('\n'):
+        line = line.strip()
+        # Skip internal page separator markers
+        if not line or line == "--- PAGE_SEPARATOR ---":
+            continue
+        paragraphs_out.append(line)
+
+    logger.info(f"[{filename}] {len(paragraphs_out)} paragraphes extraits pour le pipeline LLM.")
+    return paragraphs_out

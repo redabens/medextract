@@ -465,3 +465,73 @@ def parse_docx_to_qcm(docx_path, category):
                     corr_img_idx += 1
                     
     return questions
+
+
+def extract_docx_raw_paragraphs(docx_path: str) -> list:
+    """
+    Extracts a flat list of raw text paragraphs from a DOCX file for use by
+    the LLM pipeline (Epic 02). Images are resolved to stable [[IMG_...]]
+    placeholders. Correction tables (inside <w:tbl>) are excluded to avoid
+    confusion during LLM structuring.
+
+    Args:
+        docx_path: Absolute path to the .docx file.
+
+    Returns:
+        List of non-empty cleaned paragraph strings.
+    """
+    filename = os.path.basename(docx_path)
+    file_hash = generate_file_hash(docx_path)
+
+    relations, zip_images, doc_xml = extract_docx_media_and_xml(docx_path)
+    if doc_xml is None:
+        return []
+
+    doc_tree = etree.fromstring(doc_xml)
+
+    # Track globally unique image index across all paragraphs
+    img_global_idx = [1]
+    # Cache rId -> stable placeholder so duplicate references reuse the same name
+    rid_to_placeholder: dict = {}
+
+    def resolve_img_rids(text: str, q_num_hint: str = "X") -> str:
+        """Replace [[IMG_RID:rIdN]] with stable [[IMG_...]] placeholders."""
+        def replacer(m):
+            r_id = m.group(1)
+            if r_id in rid_to_placeholder:
+                return rid_to_placeholder[r_id]
+            if r_id in zip_images:
+                img_data, ext = zip_images[r_id]
+                img_name = f"IMG_{file_hash}_Q{q_num_hint}_I{img_global_idx[0]}{ext}"
+                dest_path = os.path.join(IMAGE_DIR, img_name)
+                with open(dest_path, "wb") as f_img:
+                    f_img.write(img_data)
+                placeholder = f"[[{os.path.splitext(img_name)[0]}]]"
+                rid_to_placeholder[r_id] = placeholder
+                img_global_idx[0] += 1
+                return placeholder
+            return f"[[IMG_MISSING:{r_id}]]"
+        return re.sub(r'\[\[IMG_RID:(rId\d+)\]\]', replacer, text)
+
+    paragraphs_out = []
+    all_p_elems = doc_tree.xpath('//w:p', namespaces=NAMESPACES)
+
+    for p_elem in all_p_elems:
+        # Skip paragraphs that live inside correction tables
+        if p_elem.xpath('./ancestor::w:tbl', namespaces=NAMESPACES):
+            continue
+
+        raw_text = clean_text(parse_paragraph_node(p_elem))
+        if not raw_text:
+            continue
+
+        # Split on embedded newlines (e.g. line-break runs)
+        for line in raw_text.split('\n'):
+            line = line.strip()
+            if not line:
+                continue
+            line = resolve_img_rids(line)
+            paragraphs_out.append(line)
+
+    logger.info(f"[{filename}] {len(paragraphs_out)} paragraphes extraits pour le pipeline LLM.")
+    return paragraphs_out

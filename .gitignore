@@ -40,7 +40,7 @@ output/
 !output/README.md  # If you want to keep output folder structure, but usually outputs are gitignored
 
 # PDFs and other generated files
-*.pdf
+Offre_de_Service_MedExtract_IA.pdf
 *.log
 *.txt
 
@@ -51,3 +51,6 @@ backlog_medextract.md
 
 # Epic folder
 Epic/
+
+# API keys and environment configurations
+.env

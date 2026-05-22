@@ -1,0 +1,53 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / Packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+.venv/
+venv/
+ENV/
+env/
+
+# Editor / IDE settings
+.vscode/
+.idea/
+
+# Local data / pipeline outputs
+output/
+!output/README.md  # If you want to keep output folder structure, but usually outputs are gitignored
+
+# PDFs and other generated files
+*.pdf
+*.log
+*.txt
+
+# some markdown files
+rapport_avancement.md
+specifications_medextract.md
+backlog_medextract.md
+
+# Epic folder
+Epic/

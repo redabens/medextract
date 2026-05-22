@@ -15,7 +15,7 @@ IMAGE_DIR = os.path.join(OUTPUT_DIR, "images")
 # 2. LLM Engine Configurations
 USE_LLM = False  # Set to True to enable the Agno LLM Engine
 LLM_PROVIDER = "google"      # Options: "openai", "google", "anthropic"
-LLM_MODEL = "gemini-2.0-flash"  # Recommended Gemini model (fast + structured output)
+LLM_MODEL = "gemini-2.5-flash"  # Best available model on this API key (fast + high quality)
 GOOGLE_API_KEY  = os.getenv("GOOGLE_API_KEY", "")
 OPENAI_API_KEY  = os.getenv("OPENAI_API_KEY", "")  # Keep for compatibility
 

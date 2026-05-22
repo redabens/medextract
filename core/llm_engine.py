@@ -135,15 +135,15 @@ def get_structuring_agent() -> Agent:
             "1. LOGIQUE DE QUESTION (logic_type) :",
             "   - Categorizez chaque question en logic_type = 'POSITIVE' (Reponse Juste - RJ) ou 'NEGATIVE' (Reponse Fausse - RF).",
             "   - Le type 'NEGATIVE' s'applique des que la consigne recherche l'intruse, l'affirmation incorrecte, ou exclut un diagnostic.",
-            "   - Mots-cles indicateurs : 'fausse', 'sauf', 'incorrecte', 'a l'exclusion de', 'eliminer', 'ne fait pas partie'.",
+            "   - Mots-cles indicateurs : 'fausse', 'sauf', 'incorrecte', 'a l exclusion de', 'eliminer', 'ne fait pas partie'.",
             "",
             "2. STRUCTURES COMPLEXES (K-TYPE) :",
-            "   - Si le texte liste des affirmations numerotees (1, 2, 3, 4) suivies d'options de combinaisons (A=1+2, B=2+3...),",
+            "   - Si le texte liste des affirmations numerotees (1, 2, 3, 4) suivies d options de combinaisons (A=1+2, B=2+3...),",
             "     renseignez ces affirmations dans 'sub_propositions'.",
             "   - Deduisez et marquez la veracite de chaque sous-proposition ('is_true': true/false) via la correction fournie.",
             "   - Pour les QCM directs (A, B, C, D, E sans affirmations intermediaires), laissez 'sub_propositions' vide.",
             "",
-            "3. PROTECTION DES PLACEHOLDERS D'IMAGES :",
+            "3. PROTECTION DES PLACEHOLDERS D IMAGES :",
             "   - Conservez EXACTEMENT et sans modification les placeholders [[IMG_xxxx_Qxx]] ou [[IMG_xxxx_Pxx_Ixx]].",
             "   - Listez-les dans 'question_images' ou 'correction_images' selon leur emplacement.",
             "   - Positionnez 'has_image' a True si au moins un placeholder est present.",
@@ -155,12 +155,11 @@ def get_structuring_agent() -> Agent:
             "   - Remplissez 'correction.comment' avec la justification clinique complete en francais.",
             "   - Assurez une concordance absolue entre 'correction.answer_letter' et le drapeau 'is_correct' de chaque option."
         ],
-        response_format=QCMBatchResponse,
-        temperature=0.0,
+        output_schema=QCMBatchResponse,   # Agno 2.x: Pydantic schema for structured JSON output
         markdown=False
     )
 
-    logger.info(f"Agent Agno initialise avec succes (provider={LLM_PROVIDER}, model={LLM_MODEL}).")
+    logger.info(f"Agent Agno initialise (provider={LLM_PROVIDER}, model={LLM_MODEL}).")
     return _structuring_agent
 
 
@@ -170,46 +169,53 @@ def get_structuring_agent() -> Agent:
 
 def query_llm_for_structuring(chunk_text: str, source_filename: str, category: str) -> List[MedExtractQuestion]:
     """
-    Transmet un chunk textuel à l'Agent Agno et retourne une liste de QCM hautement structurés et validés.
-    
+    Transmet un chunk textuel a l'Agent Agno et retourne une liste de QCM structures et valides.
+
     Args:
-        chunk_text: Contenu textuel brut pré-segmenté contenant un cas clinique ou un lot de questions.
-        source_filename: Nom du fichier d'origine pour traçabilité.
-        category: Spécialité médicale associée.
-        
+        chunk_text: Contenu textuel brut pre-segmente contenant un cas clinique ou un lot de questions.
+        source_filename: Nom du fichier d'origine pour tracabilite.
+        category: Specialite medicale associee.
+
     Returns:
-        Liste d'objets MedExtractQuestion validés.
+        Liste d'objets MedExtractQuestion valides.
     """
     agent = get_structuring_agent()
-    
-    prompt = f"""
-    --- CONTEXTE D'EXTRACTION ---
-    Fichier source : {source_filename}
-    Catégorie médicale : {category}
-    
-    --- TEXTE BRUT DE QCM À STRUCTURER ---
-    {chunk_text}
-    """
-    
-    logger.info(f"Envoi du chunk ({len(chunk_text)} caractères) à l'Agent Agno...")
-    
+
+    prompt = (
+        f"--- CONTEXTE D'EXTRACTION ---\n"
+        f"Fichier source : {source_filename}\n"
+        f"Categorie medicale : {category}\n\n"
+        f"--- TEXTE BRUT DE QCM A STRUCTURER ---\n"
+        f"{chunk_text}"
+    )
+
+    logger.info(f"Envoi du chunk ({len(chunk_text)} chars) a l'Agent Agno...")
+
     try:
         response = agent.run(prompt)
-        
-        # Le framework Agno désérialise et valide automatiquement selon response_format (QCMBatchResponse)
-        batch_response: QCMBatchResponse = response.content
-        
+        content = response.content
+
+        # Agno with output_model returns the Pydantic object directly in content
+        if isinstance(content, QCMBatchResponse):
+            batch_response = content
+        elif isinstance(content, str):
+            # Fallback: parse raw JSON string if content is a string
+            import json
+            raw = json.loads(content)
+            batch_response = QCMBatchResponse.model_validate(raw)
+        else:
+            raise ValueError(f"Type de reponse inattendu de l'Agent Agno : {type(content)}")
+
         questions = batch_response.questions
-        logger.info(f"Extraction réussie de {len(questions)} questions via Agno.")
-        
-        # Injecter post-traitement les valeurs de source_file et category pour garantir la cohérence
+        logger.info(f"Extraction reussie : {len(questions)} question(s) via Agno.")
+
+        # Post-inject source_file and category to guarantee consistency
         for q in questions:
             q.source_file = source_filename
             q.category = category
-            
+
         return questions
-        
+
     except Exception as e:
         logger.error(f"Erreur lors de la structuration par l'Agent Agno: {e}", exc_info=True)
-        # On remonte l'exception pour permettre la reprise ou la mise en œuvre de la stratégie de fallback
         raise e

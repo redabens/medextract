@@ -48,14 +48,14 @@ def parse_options_line(text):
     
     # Verify that the matches are indeed sequential option letters if there are multiple matches
     if len(matches) > 1:
-        letters = [m.group(1) for m in matches]
+        letters = [m.group(1).upper() for m in matches]  # Normalize for sequential check
         # Allow any sequential subset of A-E, e.g. A, B, C or B, C, D
         is_sequential = all(ord(letters[i]) + 1 == ord(letters[i+1]) for i in range(len(letters)-1))
         if not is_sequential and letters[0] != 'A':
             return []
             
     for m in matches:
-        letter = m.group(1)
+        letter = m.group(1).upper()  # Normalize a-e → A-E
         opt_text = clean_text(m.group(2))
         options.append({
             "letter": letter,

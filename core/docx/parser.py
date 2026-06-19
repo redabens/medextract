@@ -1,5 +1,4 @@
 import os
-import zipfile
 import re
 import hashlib
 from lxml import etree
@@ -17,130 +16,14 @@ from core.utils import (
     extract_logic_type,
     parse_options_line
 )
-from core.omml_converter import parse_omml_element
+from core.docx.extractor import (
+    NAMESPACES,
+    parse_cell_node,
+    parse_paragraph_node,
+    extract_docx_media_and_xml
+)
 
 logger = get_logger("docx_parser")
-
-# XML Namespaces used in Word OpenXML documents
-NAMESPACES = {
-    'w': 'http://schemas.openxmlformats.org/wordprocessingml/2006/main',
-    'r': 'http://schemas.openxmlformats.org/officeDocument/2006/relationships',
-    'wp': 'http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing',
-    'a': 'http://schemas.openxmlformats.org/drawingml/2006/main',
-    'pic': 'http://schemas.openxmlformats.org/drawingml/2006/picture',
-    'm': 'http://schemas.openxmlformats.org/officeDocument/2006/math'
-}
-
-def parse_paragraph_node(p_elem):
-    """
-    Parses a single paragraph XML element, preserving text runs,
-    Office Math equations (OMML), and image references.
-    """
-    if p_elem is None:
-        return ""
-        
-    parts = []
-    
-    # Iterate through all direct children of the paragraph to maintain strict reading order
-    for child in p_elem.getchildren():
-        tag_local = etree.QName(child.tag).localname
-        
-        # 1. Standard Run
-        if tag_local == 'r':
-            # Support text, line breaks (br), and tabs in order
-            for r_child in child.getchildren():
-                r_child_tag = etree.QName(r_child.tag).localname
-                if r_child_tag == 't':
-                    if r_child.text:
-                        parts.append(r_child.text)
-                elif r_child_tag == 'br':
-                    parts.append('\n')
-                elif r_child_tag == 'tab':
-                    parts.append('\t')
-                    
-            # Check for inline drawings (images) in this run
-            drawings = child.xpath('.//w:drawing', namespaces=NAMESPACES)
-            for drawing in drawings:
-                blips = drawing.xpath('.//a:blip', namespaces=NAMESPACES)
-                if blips:
-                    r_id = blips[0].get(f"{{{NAMESPACES['r']}}}embed")
-                    if r_id:
-                        parts.append(f" [[IMG_RID:{r_id}]] ")
-                        
-        # 2. Office Math Equations (OMML)
-        elif tag_local in ('oMath', 'oMathPara'):
-            math_text = parse_omml_element(child)
-            if math_text:
-                parts.append(math_text)
-                
-        # 3. Hyperlinks (which wrap runs)
-        elif tag_local == 'hyperlink':
-            for run_child in child.xpath('.//w:r', namespaces=NAMESPACES):
-                for r_child in run_child.getchildren():
-                    r_child_tag = etree.QName(r_child.tag).localname
-                    if r_child_tag == 't':
-                        if r_child.text:
-                            parts.append(r_child.text)
-                    elif r_child_tag == 'br':
-                        parts.append('\n')
-                    elif r_child_tag == 'tab':
-                        parts.append('\t')
-                        
-    return "".join(parts)
-
-def parse_cell_node(cell_elem):
-    """
-    Parses a table cell XML element paragraph by paragraph.
-    """
-    p_texts = []
-    for p in cell_elem.xpath('.//w:p', namespaces=NAMESPACES):
-        p_text = clean_text(parse_paragraph_node(p))
-        if p_text:
-            p_texts.append(p_text)
-    return "\n".join(p_texts)
-
-def extract_docx_media_and_xml(docx_path):
-    """
-    Opens the docx as a ZIP file, extracts relation mapping (rId -> media path)
-    and loads images and the document XML into memory.
-    """
-    relations = {}
-    zip_images = {}
-    doc_xml = None
-    
-    if not os.path.exists(docx_path):
-        logger.error(f"Fichier DOCX introuvable: {docx_path}")
-        return relations, zip_images, None
-        
-    with zipfile.ZipFile(docx_path) as z:
-        # 1. Parse relationship mapping
-        try:
-            rels_xml = z.read('word/_rels/document.xml.rels')
-            rels_tree = etree.fromstring(rels_xml)
-            for rel in rels_tree.xpath('//*[local-name()="Relationship"]'):
-                r_id = rel.get('Id')
-                target = rel.get('Target')
-                r_type = rel.get('Type')
-                if r_id and target and "image" in r_type:
-                    # Target paths are usually like 'media/image1.png'
-                    relations[r_id] = target
-        except KeyError:
-            logger.warning("Fichier de relations word/_rels/document.xml.rels introuvable.")
-            
-        # 2. Extract image binaries in memory
-        for r_id, target in relations.items():
-            zip_path = f"word/{target}"
-            try:
-                img_data = z.read(zip_path)
-                ext = os.path.splitext(target)[1]
-                zip_images[r_id] = (img_data, ext)
-            except KeyError:
-                logger.warning(f"Image relation {r_id} ({zip_path}) introuvable dans l'archive zip.")
-                
-        # 3. Read main document XML
-        doc_xml = z.read('word/document.xml')
-        
-    return relations, zip_images, doc_xml
 
 def parse_docx_to_qcm(docx_path, category):
     """
@@ -160,40 +43,82 @@ def parse_docx_to_qcm(docx_path, category):
     # 2. Parse corrections tables
     # Structure target list: [{"answer_letter": str, "comment": str, "images": list}]
     corrections = []
-    
+
     for table_elem in doc_tree.xpath('//w:tbl', namespaces=NAMESPACES):
-        rows = table_elem.xpath('.//w:tr', namespaces=NAMESPACES)
+        # Skip nested tables to avoid double-processing or column count pollution
+        if table_elem.xpath('./ancestor::w:tc', namespaces=NAMESPACES):
+            continue
+
+        rows = table_elem.xpath('./w:tr', namespaces=NAMESPACES)
         if not rows:
             continue
-            
-        # Process the rows of the table
+
+        # --- Detect number of columns in first row ---
+        first_row_cells = rows[0].xpath('./w:tc', namespaces=NAMESPACES)
+        n_cols = len(first_row_cells)
+
+        # Skip large pedagogical tables (> 3 columns) — not correction tables
+        if n_cols > 3:
+            logger.debug(f"[{filename}] Table ignorée (tableau pédagogique, {n_cols} colonnes).")
+            continue
+
+        # --- New format: multi-line table (each row = one line of the correction comment)
+        # Heuristic: if table has 1 column and multiple rows, it belongs to the PREVIOUS correction
+        if n_cols == 1 and len(rows) > 1:
+            # This is a multi-row, 1-column table → append lines to last correction's comment
+            extra_lines = []
+            for row in rows:
+                cells = row.xpath('./w:tc', namespaces=NAMESPACES)
+                if cells:
+                    cell_text = parse_cell_node(cells[0]).strip()
+                    if cell_text:
+                        extra_lines.append(cell_text)
+            if corrections and extra_lines:
+                corrections[-1]["comment"] += "\n" + "\n".join(extra_lines)
+            elif extra_lines:
+                # Standalone multi-row 1-col table: try to extract answer from first line
+                first_line = extra_lines[0].strip()
+                ans_match = re.match(r'^([A-E]{1,5})', first_line)
+                if ans_match:
+                    ans = ans_match.group(1).upper()
+                    comment = "\n".join(extra_lines[1:]) if len(extra_lines) > 1 else ""
+                    corrections.append({"answer_letter": ans, "comment": comment, "r_idx": 0})
+            continue
+
+        # --- Standard format: process row by row ---
         for r_idx, row in enumerate(rows):
-            cells = row.xpath('.//w:tc', namespaces=NAMESPACES)
+            cells = row.xpath('./w:tc', namespaces=NAMESPACES)
             if not cells:
                 continue
-                
+
             cell_texts = [parse_cell_node(c) for c in cells]
-            
-            # Simple check if this row contains correction data
-            # Format 2 columns: [Answers, Comment]
+
+            # Format 2 columns: [Answer, Comment] — standard correction table
             if len(cell_texts) == 2:
                 ans = cell_texts[0].strip()
                 # Skip header row if exists
                 if ans.lower() in ("question", "numéro", "num", "réponse", "réponses", "correction"):
                     continue
+                # Skip rows where 'ans' is not a letter sequence (e.g. pedagogical headers)
+                # Allow empty answers (0 letters) to prevent shift mismatch
+                if not re.match(r'^[A-Ea-e]{0,5}$', re.sub(r'[\s,+]', '', ans)):
+                    continue
                 corrections.append({
-                    "answer_letter": ans,
+                    "answer_letter": ans.upper(),
                     "comment": cell_texts[1],
                     "r_idx": r_idx
                 })
             # Format 3 columns: [Question ID/Num, Answers, Comment]
             elif len(cell_texts) == 3:
                 ans = cell_texts[1].strip()
-                # Skip header row
+                # Skip header rows
                 if ans.lower() in ("réponse", "réponses", "correction") or cell_texts[0].lower() in ("question", "numéro", "num"):
                     continue
+                # Validate that ans is a valid answer letter sequence (allows empty answers too)
+                if not re.match(r'^[A-Ea-e]{0,5}$', re.sub(r'[\s,+/&\-]', '', ans)):
+                    continue
                 corrections.append({
-                    "answer_letter": ans,
+                    "answer_letter": ans.upper(),
                     "comment": cell_texts[2],
                     "r_idx": r_idx
                 })
@@ -203,12 +128,26 @@ def parse_docx_to_qcm(docx_path, category):
     current_case = None
     current_question = None
     accumulated_context = []
-    
+    # Auto-counter for unnumbered questions (new format)
+    _unnumbered_q_counter = [0]
+
     # Regex rules
     case_start_regex = CASE_START_REGEX
     question_start_regex = QUESTION_START_REGEX
     sub_prop_regex = SUB_PROP_REGEX
-    
+
+    # Detect questions without leading number:
+    # Pattern: sentence ending with explicit exam annotation like (2023 P8-1T) or containing (cochez...)
+    # NOTE: Do NOT use a bare '?' as trigger — too many regular sentences end with ? in numbered files
+    UNNUMBERED_Q_ANNOTATION = re.compile(
+        r'\(?\d{4}\s+P\d+-\d+T\)?\s*$|'           # Exam source annotation: (2023 P8-1T)
+        r'\(cochez\s+la\s+r[eé]ponse|'             # Explicit "(cochez la réponse..."
+        r'cocher\s+la\s+r[eé]ponse|'               # Without parenthesis "cocher la réponse"
+        r'\(indiquez|'                              # "(indiquez..."
+        r'\(parmi\s+les',                           # "(parmi les..."
+        re.IGNORECASE
+    )
+
     paragraphs = doc_tree.xpath('//w:p', namespaces=NAMESPACES)
     
     for p_elem in paragraphs:
@@ -240,17 +179,17 @@ def parse_docx_to_qcm(docx_path, category):
                 accumulated_context = []
                 continue
                 
-            # Detect start of question
+            # Detect start of question (numbered format: "42. texte")
             q_match = question_start_regex.match(text)
             if q_match:
                 q_num = int(q_match.group(1))
                 q_instruction = clean_text(q_match.group(2))
-                
-                # Heuristic to detect K-Type numbered sub-propositions (1-5) falsely matched as question start
+
+                # Heuristic: K-Type numbered sub-propositions (1-5) falsely matched as question start
                 is_sub_prop = False
                 if current_question and len(current_question["options"]) == 0 and 1 <= q_num <= 5:
                     is_sub_prop = True
-                    
+
                 if is_sub_prop:
                     if len(current_question["options"]) == 0:
                         current_question["sub_propositions"].append({
@@ -260,11 +199,11 @@ def parse_docx_to_qcm(docx_path, category):
                         })
                         current_question["question_type"] = "K_TYPE"
                     continue
-                    
+
                 # Save preceding question
                 if current_question:
                     questions.append(current_question)
-                    
+
                 # Initialize new question
                 current_question = {
                     "source_file": filename,
@@ -282,6 +221,41 @@ def parse_docx_to_qcm(docx_path, category):
                     "correction": None
                 }
                 continue
+
+            # --- NEW FORMAT: Detect unnumbered questions ---
+            # A line is treated as a question header if:
+            #   - It has an annotation like (2023 P8-1T) or ends with ? or contains (cochez...)
+            #   - AND it does NOT match an option letter
+            #   - AND it is reasonably long (>20 chars)
+            is_option_line = bool(parse_options_line(text))
+            is_unnumbered_q = (
+                not is_option_line
+                and len(text) > 20
+                and bool(UNNUMBERED_Q_ANNOTATION.search(text))
+                and not sub_prop_regex.match(text)
+            )
+            if is_unnumbered_q:
+                # Save preceding question
+                if current_question:
+                    questions.append(current_question)
+
+                _unnumbered_q_counter[0] += 1
+                current_question = {
+                    "source_file": filename,
+                    "category": category,
+                    "case_study": current_case.copy() if current_case else None,
+                    "context": "\n".join(accumulated_context) if accumulated_context else (current_case["context_text"] if current_case else None),
+                    "question_number": _unnumbered_q_counter[0],
+                    "question_type": "SINGLE_CHOICE",
+                    "instruction": text,
+                    "logic_type": extract_logic_type(text),
+                    "has_image": False,
+                    "question_images": [],
+                    "sub_propositions": [],
+                    "options": [],
+                    "correction": None
+                }
+                continue
                 
             # Detect option (A, B, C...)
             parsed_opts = parse_options_line(text)
@@ -290,7 +264,12 @@ def parse_docx_to_qcm(docx_path, category):
                 if current_question["options"]:
                     last_letter = current_question["options"][-1]["letter"]
                     next_letter = chr(ord(last_letter) + 1)
-                loose_match = re.match(OPTION_LOOSE_PATTERN.format(letter=next_letter), text.strip())
+                # Also try lowercase version of the next expected letter
+                loose_match = re.match(
+                    OPTION_LOOSE_PATTERN.format(letter=next_letter), text.strip()
+                ) or re.match(
+                    OPTION_LOOSE_PATTERN.format(letter=next_letter.lower()), text.strip(), re.IGNORECASE
+                )
                 if loose_match:
                     parsed_opts = [{
                         "letter": loose_match.group(1).upper(),
@@ -318,7 +297,8 @@ def parse_docx_to_qcm(docx_path, category):
                         current_question["question_type"] = "K_TYPE"
                 else:
                     first_opt = parsed_opts[0]
-                    if re.match(OPTION_LOOSE_PATTERN.format(letter=first_opt["letter"]), text.strip()):
+                    # Use IGNORECASE to support lowercase option letters (a-e)
+                    if re.match(OPTION_LOOSE_PATTERN.format(letter=first_opt["letter"]), text.strip(), re.IGNORECASE):
                         current_question["options"].extend(parsed_opts)
                 continue
                 
@@ -345,6 +325,14 @@ def parse_docx_to_qcm(docx_path, category):
                 else:
                     accumulated_context.append(text)
                     current_case["context_text"] += "\n[Mise à jour] " + text
+            elif current_question:
+                # If there's no active clinical case, but a question is active,
+                # capture standalone image placeholders to avoid losing them
+                if "[[IMG_RID:" in text:
+                    if current_question["instruction"]:
+                        current_question["instruction"] += "\n" + text
+                    else:
+                        current_question["instruction"] = text
                 
     # Save the last question
     if current_question:
@@ -352,7 +340,30 @@ def parse_docx_to_qcm(docx_path, category):
         
     logger.info(f"[{filename}] Questions détectées: {len(questions)}, Corrections trouvées: {len(corrections)}")
     
-    # 4. Pair 1-to-1 questions with corrections
+    # 4. Normalize question types and deduplicate options before pairing
+    for question in questions:
+        # 4a. K_TYPE without sub_propositions → downgrade to SINGLE/MULTIPLE_CHOICE
+        if question["question_type"] == "K_TYPE" and not question.get("sub_propositions"):
+            n_opts = len(question["options"])
+            question["question_type"] = "MULTIPLE_CHOICE" if n_opts > 1 else "SINGLE_CHOICE"
+
+        # 4b. Deduplicate options: if same letter appears twice (parsing artefact), keep the longer text version
+        seen_letters = {}
+        deduped = []
+        for opt in question["options"]:
+            letter = opt["letter"]
+            if letter not in seen_letters:
+                seen_letters[letter] = opt
+                deduped.append(opt)
+            else:
+                # Keep the option with the longer text (more informative)
+                if len(opt["text"]) > len(seen_letters[letter]["text"]):
+                    idx_existing = next(i for i, o in enumerate(deduped) if o["letter"] == letter)
+                    deduped[idx_existing] = opt
+                    seen_letters[letter] = opt
+        question["options"] = deduped
+
+    # 5. Pair 1-to-1 questions with corrections
     for idx, question in enumerate(questions):
         if idx < len(corrections):
             corr = corrections[idx]
@@ -465,73 +476,3 @@ def parse_docx_to_qcm(docx_path, category):
                     corr_img_idx += 1
                     
     return questions
-
-
-def extract_docx_raw_paragraphs(docx_path: str) -> list:
-    """
-    Extracts a flat list of raw text paragraphs from a DOCX file for use by
-    the LLM pipeline (Epic 02). Images are resolved to stable [[IMG_...]]
-    placeholders. Correction tables (inside <w:tbl>) are excluded to avoid
-    confusion during LLM structuring.
-
-    Args:
-        docx_path: Absolute path to the .docx file.
-
-    Returns:
-        List of non-empty cleaned paragraph strings.
-    """
-    filename = os.path.basename(docx_path)
-    file_hash = generate_file_hash(docx_path)
-
-    relations, zip_images, doc_xml = extract_docx_media_and_xml(docx_path)
-    if doc_xml is None:
-        return []
-
-    doc_tree = etree.fromstring(doc_xml)
-
-    # Track globally unique image index across all paragraphs
-    img_global_idx = [1]
-    # Cache rId -> stable placeholder so duplicate references reuse the same name
-    rid_to_placeholder: dict = {}
-
-    def resolve_img_rids(text: str, q_num_hint: str = "X") -> str:
-        """Replace [[IMG_RID:rIdN]] with stable [[IMG_...]] placeholders."""
-        def replacer(m):
-            r_id = m.group(1)
-            if r_id in rid_to_placeholder:
-                return rid_to_placeholder[r_id]
-            if r_id in zip_images:
-                img_data, ext = zip_images[r_id]
-                img_name = f"IMG_{file_hash}_Q{q_num_hint}_I{img_global_idx[0]}{ext}"
-                dest_path = os.path.join(IMAGE_DIR, img_name)
-                with open(dest_path, "wb") as f_img:
-                    f_img.write(img_data)
-                placeholder = f"[[{os.path.splitext(img_name)[0]}]]"
-                rid_to_placeholder[r_id] = placeholder
-                img_global_idx[0] += 1
-                return placeholder
-            return f"[[IMG_MISSING:{r_id}]]"
-        return re.sub(r'\[\[IMG_RID:(rId\d+)\]\]', replacer, text)
-
-    paragraphs_out = []
-    all_p_elems = doc_tree.xpath('//w:p', namespaces=NAMESPACES)
-
-    for p_elem in all_p_elems:
-        # Skip paragraphs that live inside correction tables
-        if p_elem.xpath('./ancestor::w:tbl', namespaces=NAMESPACES):
-            continue
-
-        raw_text = clean_text(parse_paragraph_node(p_elem))
-        if not raw_text:
-            continue
-
-        # Split on embedded newlines (e.g. line-break runs)
-        for line in raw_text.split('\n'):
-            line = line.strip()
-            if not line:
-                continue
-            line = resolve_img_rids(line)
-            paragraphs_out.append(line)
-
-    logger.info(f"[{filename}] {len(paragraphs_out)} paragraphes extraits pour le pipeline LLM.")
-    return paragraphs_out

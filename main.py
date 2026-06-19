@@ -32,169 +32,17 @@ import argparse
 from core.config import get_logger, OUTPUT_DIR, IMAGE_DIR, USE_LLM
 
 # ─── Rule-based parsers (Epic 01) ────────────────────────────────────────────
-from core.docx_parser import parse_docx_to_qcm, extract_docx_raw_paragraphs
-from core.pdf_parser  import parse_pdf_to_qcm,  extract_pdf_raw_paragraphs
+from core.docx import parse_docx_to_qcm
+from core.pdf  import parse_pdf_to_qcm
 
-# ─── LLM pipeline components (Epic 02) ────────────────────────────────────────
-from core.chunker    import segment_text_into_logical_chunks
-from core.llm_engine import query_llm_for_structuring, MedExtractQuestion
+# ─── Category & Validation helpers ───────────────────────────────────────────
+from core.category import auto_deduce_category
+from core.validator import validate_qcm_structure
+
+# ─── LLM pipeline (Epic 02) ──────────────────────────────────────────────────
+from core.llm_pipeline import run_llm_pipeline
 
 logger = get_logger("main_orchestrator")
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Helpers
-# ─────────────────────────────────────────────────────────────────────────────
-
-def auto_deduce_category(filename: str) -> str:
-    """
-    Auto-deduces the medical specialty from the file name.
-    Falls back to 'Médecine Générale' if nothing matches.
-    """
-    name_lower = filename.lower()
-    if "cardio" in name_lower:
-        return "Cardiologie"
-    elif "hge" in name_lower:
-        return "Hépato-Gastro-Entérologie"
-    elif any(k in name_lower for k in ("diab", "ex 01", "ex 02", "cas clinique 0")):
-        return "Diabétologie"
-    elif "residanat" in name_lower:
-        return "Résidanat"
-    elif "pneumo" in name_lower:
-        return "Pneumologie"
-    elif "nephro" in name_lower:
-        return "Néphrologie"
-    elif "neuro" in name_lower:
-        return "Neurologie"
-    elif "dermato" in name_lower:
-        return "Dermatologie"
-    elif "gyneco" in name_lower or "obstétri" in name_lower:
-        return "Gynécologie-Obstétrique"
-    elif "pediatr" in name_lower or "pédiatr" in name_lower:
-        return "Pédiatrie"
-    elif "ortho" in name_lower or "traumato" in name_lower:
-        return "Orthopédie-Traumatologie"
-    return "Médecine Générale"
-
-
-def validate_qcm_structure(questions: list) -> tuple:
-    """
-    Performs basic logic and structural validations on extracted questions
-    to ensure full compliance with target specifications.
-
-    Returns:
-        Tuple of (valid_count: int, errors: list[str])
-    """
-    valid_count = 0
-    errors = []
-
-    required_fields = [
-        "source_file", "category", "question_number", "question_type",
-        "instruction", "logic_type", "has_image", "question_images",
-        "sub_propositions", "options", "correction"
-    ]
-
-    for q in questions:
-        q_num = q.get("question_number", "?")
-        src   = q.get("source_file", "?")
-
-        # 1. Required fields
-        missing = [f for f in required_fields if f not in q]
-        if missing:
-            errors.append(f"Q{q_num} [{src}]: Champs manquants → {missing}")
-            continue
-
-        # 2. Options present
-        if not q.get("options"):
-            errors.append(f"Q{q_num} [{src}]: Aucune option de réponse")
-            continue
-
-        # 3. Correction answer letter
-        if "answer_letter" not in (q.get("correction") or {}):
-            errors.append(f"Q{q_num} [{src}]: Lettre de correction manquante")
-            continue
-
-        # 4. K-TYPE must have sub_propositions
-        if q["question_type"] == "K_TYPE" and not q.get("sub_propositions"):
-            errors.append(f"Q{q_num} [{src}]: K_TYPE sans sous-propositions")
-            continue
-
-        valid_count += 1
-
-    return valid_count, errors
-
-
-def pydantic_to_dict(q: MedExtractQuestion) -> dict:
-    """Converts a Pydantic MedExtractQuestion model to a plain dict for JSON output."""
-    return q.model_dump(mode="json")
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# LLM Pipeline (Epic 02)
-# ─────────────────────────────────────────────────────────────────────────────
-
-def run_llm_pipeline(filepath: str, filename: str, category: str) -> list:
-    """
-    Full LLM extraction pipeline for a single file:
-      1. Physical extraction of paragraphs + image placeholders
-      2. Semantic chunking (preserves clinical dossier integrity)
-      3. Agno LLM structuring → validated Pydantic objects
-      4. Convert to dicts for unified JSON output
-
-    Returns:
-        List of question dicts compatible with the rule-based output format.
-    """
-    ext = filename.lower()
-
-    # ── Step 1: Raw paragraph extraction ─────────────────────────────────────
-    logger.info(f"[LLM] Extraction des paragraphes bruts de '{filename}'...")
-    if ext.endswith(".docx"):
-        paragraphs = extract_docx_raw_paragraphs(filepath)
-    elif ext.endswith(".pdf"):
-        paragraphs = extract_pdf_raw_paragraphs(filepath)
-    else:
-        logger.warning(f"Format non supporté pour le pipeline LLM: {filename}")
-        return []
-
-    if not paragraphs:
-        logger.warning(f"[LLM] Aucun paragraphe extrait de '{filename}'.")
-        return []
-
-    logger.info(f"[LLM] {len(paragraphs)} paragraphe(s) extrait(s) de '{filename}'.")
-
-    # ── Step 2: Semantic chunking ──────────────────────────────────────────────
-    logger.info(f"[LLM] Segmentation sémantique en chunks logiques...")
-    chunks = segment_text_into_logical_chunks(paragraphs, max_questions_per_chunk=8)
-    logger.info(f"[LLM] {len(chunks)} chunk(s) créé(s) pour '{filename}'.")
-
-    if not chunks:
-        logger.warning(f"[LLM] Aucun chunk généré pour '{filename}'.")
-        return []
-
-    # ── Step 3: LLM structuring per chunk ────────────────────────────────────
-    all_questions: list[MedExtractQuestion] = []
-    for chunk_idx, chunk_text in enumerate(chunks):
-        logger.info(
-            f"[LLM] Traitement chunk {chunk_idx + 1}/{len(chunks)} "
-            f"({len(chunk_text)} chars)..."
-        )
-        try:
-            extracted = query_llm_for_structuring(chunk_text, filename, category)
-            all_questions.extend(extracted)
-        except Exception as e:
-            logger.error(
-                f"[LLM] Erreur sur chunk {chunk_idx + 1} de '{filename}': {e}",
-                exc_info=True
-            )
-            # Continue processing remaining chunks even if one fails
-            continue
-
-    logger.info(
-        f"[LLM] '{filename}' → {len(all_questions)} question(s) structurée(s) par l'Agent Agno."
-    )
-
-    # ── Step 4: Pydantic → dict conversion ───────────────────────────────────
-    return [pydantic_to_dict(q) for q in all_questions]
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -48,11 +48,12 @@ QUESTION_START_REGEX = re.compile(QUESTION_START_PATTERN)
 SUB_PROP_PATTERN = r'^([1-5])(?:[\.\)-]|:)(?!\d)\s*(.*)'
 SUB_PROP_REGEX = re.compile(SUB_PROP_PATTERN)
 
-# Pattern to detect standard option format or single option (e.g. "A. text", "E- text")
+# Pattern to detect standard option format or single option (e.g. "A. text", "E- text", "a- text", "e.text")
 OPTION_LOOSE_PATTERN = r'^({letter})(?:\s+|[\.\):=-])\s*(.*)'
 
 # Pattern to parse a full line of options, supporting multiple options on a single line (e.g. "A. 1+2  B. 3  C. 4")
-OPTION_PARSE_PATTERN = r'(?:^|\s)([A-E])(?:[\.\):=-]|\s+(?=\()|(?=\()|\s+(?=\d))\s*(.*?)(?=\s+(?:[A-E])(?:[\.\):=-]|\s+(?=\()|(?=\()|\s+(?=\d))|$)'
+# Now also handles lowercase a-e
+OPTION_PARSE_PATTERN = r'(?:^|\s)([A-Ea-e])(?:[\.\):=-]|\s+(?=\()|(?=\()|\s+(?=\d))\s*(.*?)(?=\s+(?:[A-Ea-e])(?:[\.\):=-]|\s+(?=\()|(?=\()|\s+(?=\d))|$)'
 
 # Pattern to match correction lines in final grid/explanations (e.g. "27. BD", "Q 13 - A comment")
 CORR_LINE_PATTERN = r'^(?:[qQ](?:[uU][eE][sS][tT][iI][oO][nN])?\s*)?(\d+)[\s\.:-]+([A-E]{1,5})(?:\s*[\.:-]\s*|\s+|$)(.*)'
@@ -70,8 +71,9 @@ INLINE_CORR_EXACT_REGEX = re.compile(INLINE_CORR_EXACT_PATTERN, re.IGNORECASE)
 
 # Negative logic indicator words (French medical terms)
 NEG_INDICATORS = [
-    "fausse", "fausses", "sauf", "incorrect", "incorrecte", 
+    "fausse", "fausses", "sauf", "incorrect", "incorrecte", "inexacte",
     "exclut", "ne fait pas partie", "n'est pas", "indiquer l'intrus", 
-    "(rf)", "les rf"
+    "(rf)", "les rf", "indiquez l'intrus", "proposition incorrecte",
+    "cocher la rf", "cochez la rf"
 ]
 

@@ -17,7 +17,7 @@ from core.docx import parse_docx_to_qcm
 from core.pdf import parse_pdf_to_qcm
 from core.category import auto_deduce_category
 from core.validator import validate_qcm_structure
-from core.llm_pipeline import run_llm_pipeline
+from core.llm_pipeline import run_llm_pipeline, run_hybrid_pipeline
 
 # 2. Configure the Streamlit page layout and theme
 st.set_page_config(
@@ -166,7 +166,7 @@ else:
     st.sidebar.markdown("### ⚙️ Paramètres d'extraction")
     engine_mode = st.sidebar.selectbox(
         "Moteur d'extraction :",
-        ["Règles hors-ligne (Epic 01)", "IA Agno LLM (Epic 02)"]
+        ["Règles hors-ligne", "Hybride (Recommandé)", "IA LLM pur"]
     )
     category_override = st.sidebar.text_input(
         "Catégorie / Spécialité (Optionnel) :",
@@ -202,10 +202,11 @@ else:
             with st.spinner(f"Extraction de '{selected_file_name}' en cours..."):
                 try:
                     questions = []
-                    use_llm_m = (engine_mode == "IA Agno LLM (Epic 02)")
                     
-                    if use_llm_m:
+                    if engine_mode == "IA LLM pur":
                         questions = run_llm_pipeline(actual_filepath, selected_file_name, category)
+                    elif engine_mode == "Hybride (Recommandé)":
+                        questions = run_hybrid_pipeline(actual_filepath, selected_file_name, category)
                     else:
                         ext_lower = selected_file_name.lower()
                         if ext_lower.endswith(".docx"):
@@ -220,7 +221,7 @@ else:
                         st.error("Aucune question n'a pu être extraite de ce fichier.")
                     else:
                         # Validate
-                        valid_count, errors = validate_qcm_structure(questions)
+                        valid_count, errors, anomalies = validate_qcm_structure(questions)
                         
                         # Save output to JSON
                         out_name = f"{os.path.splitext(selected_file_name)[0]}_extracted.json"
@@ -370,8 +371,11 @@ if st.session_state.questions:
                         key=f"sub_prop_{idx}_{sp['id']}"
                     )
             
-            # Options (A-E)
-            st.markdown("**Propositions finales de réponses (A à E) :**")
+            # Options range label
+            opts_list = q.get("options", [])
+            start_l = opts_list[0]["letter"] if opts_list else "A"
+            end_l = opts_list[-1]["letter"] if opts_list else "E"
+            st.markdown(f"**Propositions finales de réponses ({start_l} à {end_l}) :**")
             for i, opt in enumerate(q.get("options", [])):
                 col_txt, col_check = st.columns([6, 1])
                 opt["text"] = col_txt.text_input(

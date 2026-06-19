@@ -78,7 +78,7 @@ def parse_docx_to_qcm(docx_path, category):
             elif extra_lines:
                 # Standalone multi-row 1-col table: try to extract answer from first line
                 first_line = extra_lines[0].strip()
-                ans_match = re.match(r'^([A-E]{1,5})', first_line)
+                ans_match = re.match(r'^([A-G]{1,7})', first_line)
                 if ans_match:
                     ans = ans_match.group(1).upper()
                     comment = "\n".join(extra_lines[1:]) if len(extra_lines) > 1 else ""
@@ -93,35 +93,55 @@ def parse_docx_to_qcm(docx_path, category):
 
             cell_texts = [parse_cell_node(c) for c in cells]
 
-            # Format 2 columns: [Answer, Comment] — standard correction table
+            # Format 2 columns: [QuestionNum-Answer, Comment] or [Answer, Comment]
             if len(cell_texts) == 2:
                 ans = cell_texts[0].strip()
                 # Skip header row if exists
                 if ans.lower() in ("question", "numéro", "num", "réponse", "réponses", "correction"):
                     continue
-                # Skip rows where 'ans' is not a letter sequence (e.g. pedagogical headers)
-                # Allow empty answers (0 letters) to prevent shift mismatch
-                if not re.match(r'^[A-Ea-e]{0,5}$', re.sub(r'[\s,+]', '', ans)):
-                    continue
-                corrections.append({
-                    "answer_letter": ans.upper(),
-                    "comment": cell_texts[1],
-                    "r_idx": r_idx
-                })
+                
+                # Try to match both question number and answer, e.g. "31-B" or "61) D"
+                match = re.match(r'^(?:Q|QST|Question\s*)?(\d+)\s*[\s\.:\)-]+\s*([A-G]{1,7})$', ans, re.IGNORECASE)
+                if match:
+                    q_num = int(match.group(1))
+                    ans_letter = match.group(2).upper()
+                    corrections.append({
+                        "q_num": q_num,
+                        "answer_letter": ans_letter,
+                        "comment": cell_texts[1],
+                        "r_idx": r_idx
+                    })
+                else:
+                    # Fallback to answer only, check if valid letter sequence up to G
+                    ans_clean = re.sub(r'[\s,+]', '', ans)
+                    if re.match(r'^[A-Ga-g]{1,7}$', ans_clean):
+                        corrections.append({
+                            "q_num": None,
+                            "answer_letter": ans.upper(),
+                            "comment": cell_texts[1],
+                            "r_idx": r_idx
+                        })
             # Format 3 columns: [Question ID/Num, Answers, Comment]
             elif len(cell_texts) == 3:
+                q_col = cell_texts[0].strip()
                 ans = cell_texts[1].strip()
                 # Skip header rows
-                if ans.lower() in ("réponse", "réponses", "correction") or cell_texts[0].lower() in ("question", "numéro", "num"):
+                if ans.lower() in ("réponse", "réponses", "correction") or q_col.lower() in ("question", "numéro", "num"):
                     continue
-                # Validate that ans is a valid answer letter sequence (allows empty answers too)
-                if not re.match(r'^[A-Ea-e]{0,5}$', re.sub(r'[\s,+/&\-]', '', ans)):
-                    continue
-                corrections.append({
-                    "answer_letter": ans.upper(),
-                    "comment": cell_texts[2],
-                    "r_idx": r_idx
-                })
+                
+                # Extract question number from Column 0 (e.g. "121-")
+                q_num_match = re.search(r'(\d+)', q_col)
+                q_num = int(q_num_match.group(1)) if q_num_match else None
+                
+                # Validate that ans is a valid answer letter sequence up to G
+                ans_clean = re.sub(r'[\s,+/&\-]', '', ans)
+                if re.match(r'^[A-Ga-g]{0,7}$', ans_clean):
+                    corrections.append({
+                        "q_num": q_num,
+                        "answer_letter": ans.upper(),
+                        "comment": cell_texts[2],
+                        "r_idx": r_idx
+                    })
                 
     # 3. Parse paragraphs sequentially for questions and clinical cases
     questions = []
@@ -218,7 +238,8 @@ def parse_docx_to_qcm(docx_path, category):
                     "question_images": [],
                     "sub_propositions": [],
                     "options": [],
-                    "correction": None
+                    "correction": None,
+                    "_raw_text": text
                 }
                 continue
 
@@ -233,6 +254,7 @@ def parse_docx_to_qcm(docx_path, category):
                 and len(text) > 20
                 and bool(UNNUMBERED_Q_ANNOTATION.search(text))
                 and not sub_prop_regex.match(text)
+                and not (current_question and len(current_question["options"]) == 0 and len(current_question["sub_propositions"]) == 0)
             )
             if is_unnumbered_q:
                 # Save preceding question
@@ -253,7 +275,8 @@ def parse_docx_to_qcm(docx_path, category):
                     "question_images": [],
                     "sub_propositions": [],
                     "options": [],
-                    "correction": None
+                    "correction": None,
+                    "_raw_text": text
                 }
                 continue
                 
@@ -278,6 +301,7 @@ def parse_docx_to_qcm(docx_path, category):
                     }]
                     
             if parsed_opts and current_question:
+                current_question["_raw_text"] += "\n" + text
                 if len(parsed_opts) > 1:
                     # Check for K-Type shift: we already have options, and we receive a new set of multiple options starting with A
                     if current_question["options"] and parsed_opts[0]["letter"] == 'A':
@@ -305,6 +329,7 @@ def parse_docx_to_qcm(docx_path, category):
             # Detect K-type sub-proposition (1, 2, 3...)
             sub_match = sub_prop_regex.match(text)
             if sub_match and current_question and len(current_question["options"]) == 0:
+                current_question["_raw_text"] += "\n" + text
                 sub_id = int(sub_match.group(1))
                 sub_text = clean_text(sub_match.group(2))
                 current_question["sub_propositions"].append({
@@ -325,7 +350,9 @@ def parse_docx_to_qcm(docx_path, category):
                 else:
                     accumulated_context.append(text)
                     current_case["context_text"] += "\n[Mise à jour] " + text
+                    current_question["_raw_text"] += "\n" + text
             elif current_question:
+                current_question["_raw_text"] += "\n" + text
                 # If there's no active clinical case, but a question is active,
                 # capture standalone image placeholders to avoid losing them
                 if "[[IMG_RID:" in text:
@@ -363,18 +390,37 @@ def parse_docx_to_qcm(docx_path, category):
                     seen_letters[letter] = opt
         question["options"] = deduped
 
-    # 5. Pair 1-to-1 questions with corrections
+    # 5. Pair questions with corrections (by matching number or sequential fallback)
+    corr_map = {}
+    implicit_corrs = []
+    for corr in corrections:
+        if corr.get("q_num") is not None:
+            corr_map[corr["q_num"]] = corr
+        else:
+            implicit_corrs.append(corr)
+
+    implicit_idx = 0
     for idx, question in enumerate(questions):
-        if idx < len(corrections):
-            corr = corrections[idx]
+        q_num = question.get("question_number")
+        
+        # Try matching by exact question number first
+        matching_corr = None
+        if q_num in corr_map:
+            matching_corr = corr_map[q_num]
+        elif implicit_idx < len(implicit_corrs):
+            # Fallback to implicit sequential list
+            matching_corr = implicit_corrs[implicit_idx]
+            implicit_idx += 1
+
+        if matching_corr:
             question["correction"] = {
-                "answer_letter": corr["answer_letter"],
-                "comment": corr["comment"],
+                "answer_letter": matching_corr["answer_letter"],
+                "comment": matching_corr["comment"],
                 "correction_images": []
             }
             
             # Map correction answer letters to final option bools
-            correct_letters = re.findall(r'[A-E]', corr["answer_letter"])
+            correct_letters = re.findall(r'[A-G]', matching_corr["answer_letter"])
             for opt in question["options"]:
                 if opt["letter"] in correct_letters:
                     opt["is_correct"] = True

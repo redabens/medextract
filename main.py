@@ -39,8 +39,8 @@ from core.pdf  import parse_pdf_to_qcm
 from core.category import auto_deduce_category
 from core.validator import validate_qcm_structure
 
-# ─── LLM pipeline (Epic 02) ──────────────────────────────────────────────────
-from core.llm_pipeline import run_llm_pipeline
+# ─── LLM & Hybrid pipelines (Epic 02) ────────────────────────────────────────
+from core.llm_pipeline import run_llm_pipeline, run_hybrid_pipeline
 
 logger = get_logger("main_orchestrator")
 
@@ -53,7 +53,7 @@ def main():
     cli = argparse.ArgumentParser(
         description=(
             "MedExtract-API — Pipeline d'extraction de QCM médicaux DOCX/PDF.\n"
-            "Supporte deux modes : règles hors-ligne (défaut) ou Agent Agno LLM (--llm)."
+            "Supporte trois modes : règles hors-ligne, hybride coopératif ou Agent IA LLM pure."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
@@ -62,21 +62,30 @@ def main():
     cli.add_argument("--category", type=str, help="Catégorie médicale forcée (écrase la déduction automatique).")
     cli.add_argument(
         "--llm", action="store_true",
-        help="Active le moteur de structuration IA Agno (nécessite OPENAI_API_KEY dans .env)."
+        help="Active le moteur de structuration IA Agno de zéro (nécessite OPENAI_API_KEY)."
+    )
+    cli.add_argument(
+        "--hybrid", action="store_true",
+        help="Active la pipeline hybride coopérative (parser local + micro-rattrapage Gemini)."
     )
 
     args = cli.parse_args()
 
-    # Determine effective LLM mode: config.py default OR --llm flag override
-    use_llm_mode: bool = USE_LLM or args.llm
+    # Resolve execution mode
+    use_llm_mode: bool = args.llm
+    use_hybrid_mode: bool = args.hybrid
 
     if use_llm_mode:
         logger.info("=" * 60)
-        logger.info("  MODE : Agent Agno LLM (Epic 02)")
+        logger.info("  MODE : Agent Agno LLM pur (De zéro)")
+        logger.info("=" * 60)
+    elif use_hybrid_mode:
+        logger.info("=" * 60)
+        logger.info("  MODE : Hybride Coopératif (Recommandé)")
         logger.info("=" * 60)
     else:
         logger.info("=" * 60)
-        logger.info("  MODE : Parser par regles hors-ligne (Epic 01)")
+        logger.info("  MODE : Parser par règles hors-ligne")
         logger.info("=" * 60)
 
     # ── Collect input files ───────────────────────────────────────────────────
@@ -126,6 +135,9 @@ def main():
             if use_llm_mode:
                 # ── Epic 02: LLM pipeline ─────────────────────────────────
                 questions = run_llm_pipeline(filepath, filename, category)
+            elif use_hybrid_mode:
+                # ── Hybrid Cooperative Pipeline ───────────────────────────
+                questions = run_hybrid_pipeline(filepath, filename, category)
             else:
                 # ── Epic 01: Rule-based pipeline ──────────────────────────
                 if ext_lower.endswith(".docx"):
@@ -143,7 +155,7 @@ def main():
             logger.error(f"[!] ERREUR lors du traitement de '{filename}': {e}", exc_info=True)
 
     # ── Validation ────────────────────────────────────────────────────────────
-    valid_count, errors = validate_qcm_structure(all_extracted_questions)
+    valid_count, errors, anomalies = validate_qcm_structure(all_extracted_questions)
 
     # ── Persist output ────────────────────────────────────────────────────────
     output_json_path = os.path.join(OUTPUT_DIR, "extracted_qcm.json")
@@ -151,7 +163,13 @@ def main():
         json.dump(all_extracted_questions, f, ensure_ascii=False, indent=2)
 
     # ── Summary report ────────────────────────────────────────────────────────
-    mode_label = "Agno LLM (Epic 02)" if use_llm_mode else "Regles hors-ligne (Epic 01)"
+    if use_llm_mode:
+        mode_label = "IA LLM pur"
+    elif use_hybrid_mode:
+        mode_label = "Hybride Coopératif"
+    else:
+        mode_label = "Règles hors-ligne"
+        
     logger.info("=" * 60)
     logger.info(f"  Extraction terminee - Mode : {mode_label}")
     logger.info(f"  Fichiers traites    : {len(files_to_process)}")

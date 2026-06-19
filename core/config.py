@@ -15,7 +15,7 @@ IMAGE_DIR = os.path.join(OUTPUT_DIR, "images")
 # 2. LLM Engine Configurations
 USE_LLM = False  # Set to True to enable the Agno LLM Engine
 LLM_PROVIDER = "google"      # Options: "openai", "google", "anthropic"
-LLM_MODEL = "gemini-2.5-flash"  # Best available model on this API key (fast + high quality)
+LLM_MODEL = "gemini-2.5-flash"  # Explicitly chosen by user (e.g. 20 RPD limit on free tier, higher on paid tier)
 GOOGLE_API_KEY  = os.getenv("GOOGLE_API_KEY", "")
 OPENAI_API_KEY  = os.getenv("OPENAI_API_KEY", "")  # Keep for compatibility
 
@@ -52,21 +52,21 @@ SUB_PROP_REGEX = re.compile(SUB_PROP_PATTERN)
 OPTION_LOOSE_PATTERN = r'^({letter})(?:\s+|[\.\):=-])\s*(.*)'
 
 # Pattern to parse a full line of options, supporting multiple options on a single line (e.g. "A. 1+2  B. 3  C. 4")
-# Now also handles lowercase a-e
-OPTION_PARSE_PATTERN = r'(?:^|\s)([A-Ea-e])(?:[\.\):=-]|\s+(?=\()|(?=\()|\s+(?=\d))\s*(.*?)(?=\s+(?:[A-Ea-e])(?:[\.\):=-]|\s+(?=\()|(?=\()|\s+(?=\d))|$)'
+# Now also handles lowercase a-g
+OPTION_PARSE_PATTERN = r'(?:^|\s)([A-Ga-g])(?:[\.\):=-]|\s+(?=\()|(?=\()|\s+(?=\d))\s*(.*?)(?=\s+(?:[A-Ga-g])(?:[\.\):=-]|\s+(?=\()|(?=\()|\s+(?=\d))|$)'
 
 # Pattern to match correction lines in final grid/explanations (e.g. "27. BD", "Q 13 - A comment")
-CORR_LINE_PATTERN = r'^(?:[qQ](?:[uU][eE][sS][tT][iI][oO][nN])?\s*)?(\d+)[\s\.:-]+([A-E]{1,5})(?:\s*[\.:-]\s*|\s+|$)(.*)'
+CORR_LINE_PATTERN = r'^(?:[qQ](?:[uU][eE][sS][tT][iI][oO][nN])?\s*)?(\d+)[\s\.:-]+([A-G]{1,7})(?:\s*[\.:-]\s*|\s+|$)(.*)'
 CORR_LINE_REGEX = re.compile(CORR_LINE_PATTERN)
 
 # Patterns for inline explanation parsing
-INLINE_CORR_REP_PATTERN = r'^(?:R[eé]ponse|Correction|Corrig[eé])\s*[:\s-]+\s*([A-E\s,\+]+)$'
+INLINE_CORR_REP_PATTERN = r'^(?:R[eé]ponse|Correction|Corrig[eé])\s*[:\s-]+\s*([A-G\s,\+]+)$'
 INLINE_CORR_REP_REGEX = re.compile(INLINE_CORR_REP_PATTERN, re.IGNORECASE)
 
-INLINE_CORR_FIRST_LINE_PATTERN = r'^(?:\d+\s+)?([A-E]{1,5})(?:\s*[\.:+\s-]|\s+)(.*)'
+INLINE_CORR_FIRST_LINE_PATTERN = r'^(?:\d+\s+)?([A-G]{1,7})(?:\s*[\.:+\s-]|\s+)(.*)'
 INLINE_CORR_FIRST_LINE_REGEX = re.compile(INLINE_CORR_FIRST_LINE_PATTERN, re.IGNORECASE)
 
-INLINE_CORR_EXACT_PATTERN = r'^(?:\d+\s+)?([A-E]{1,5})\s*$'
+INLINE_CORR_EXACT_PATTERN = r'^(?:\d+\s+)?([A-G]{1,7})\s*$'
 INLINE_CORR_EXACT_REGEX = re.compile(INLINE_CORR_EXACT_PATTERN, re.IGNORECASE)
 
 # Negative logic indicator words (French medical terms)

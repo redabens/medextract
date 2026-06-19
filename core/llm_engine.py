@@ -1,4 +1,6 @@
 import os
+import time
+import json
 from typing import List, Optional, Literal
 from pydantic import BaseModel, Field
 
@@ -20,7 +22,7 @@ class SubProposition(BaseModel):
     )
 
 class Option(BaseModel):
-    letter: Literal["A", "B", "C", "D", "E"] = Field(description="Lettre de l'option (A, B, C, D ou E).")
+    letter: Literal["A", "B", "C", "D", "E", "F", "G"] = Field(description="Lettre de l'option (A, B, C, D, E, F ou G).")
     text: str = Field(description="Contenu textuel de la proposition de reponse (ex: '1 + 3' ou 'Pneumonie a pneumocoque').")
     is_correct: bool = Field(description="Indique si cette option de reponse finale est correcte (True) ou non (False).")
 
@@ -66,7 +68,7 @@ class MedExtractQuestion(BaseModel):
         description="Affirmations numerotees de base (principalement pour les K-Type)."
     )
     options: List[Option] = Field(
-        description="Les 5 propositions finales de reponses (A, B, C, D, E) proposees a l'etudiant."
+        description="Les propositions finales de reponses (A-G) proposees a l'etudiant (il peut y en avoir 4, 5, 6, etc.)."
     )
     correction: Correction = Field(description="Donnees de correction et explications.")
 
@@ -141,7 +143,7 @@ def get_structuring_agent() -> Agent:
             "   - Si le texte liste des affirmations numerotees (1, 2, 3, 4) suivies d options de combinaisons (A=1+2, B=2+3...),",
             "     renseignez ces affirmations dans 'sub_propositions'.",
             "   - Deduisez et marquez la veracite de chaque sous-proposition ('is_true': true/false) via la correction fournie.",
-            "   - Pour les QCM directs (A, B, C, D, E sans affirmations intermediaires), laissez 'sub_propositions' vide.",
+            "   - Pour les QCM directs (A-G sans affirmations intermediaires), laissez 'sub_propositions' vide.",
             "",
             "3. PROTECTION DES PLACEHOLDERS D IMAGES :",
             "   - Conservez EXACTEMENT et sans modification les placeholders [[IMG_xxxx_Qxx]] ou [[IMG_xxxx_Pxx_Ixx]].",
@@ -162,6 +164,71 @@ def get_structuring_agent() -> Agent:
     logger.info(f"Agent Agno initialise (provider={LLM_PROVIDER}, model={LLM_MODEL}).")
     return _structuring_agent
 
+
+def run_agent_with_retry(agent: Agent, prompt: str, max_retries: int = 5, initial_delay: float = 4.0) -> any:
+    delay = initial_delay
+    for attempt in range(max_retries):
+        try:
+            # Pacing sleep to stay under rate limits (15 RPM is ~4.0s per request)
+            time.sleep(4.2)
+            res = agent.run(prompt)
+            
+            # Inspect response content for rate limit codes returned inside JSON
+            content = res.content
+            if content:
+                err_dict = None
+                if isinstance(content, dict):
+                    err_dict = content
+                elif isinstance(content, str):
+                    try:
+                        err_dict = json.loads(content)
+                    except Exception:
+                        pass
+                
+                if isinstance(err_dict, dict) and "error" in err_dict:
+                    err_info = err_dict["error"]
+                    if isinstance(err_info, dict):
+                        code = err_info.get("code")
+                        msg = err_info.get("message", "")
+                        if code == 429 or "429" in msg or "exhausted" in msg.lower() or "limit" in msg.lower():
+                            raise RuntimeError(f"API Rate Limit Error 429: {msg}")
+            return res
+        except Exception as e:
+            err_str = str(e)
+            
+            # Check if this is a daily quota exhaustion for gemini-2.5-flash
+            if "2.5-flash" in err_str and ("quota" in err_str.lower() or "limit" in err_str.lower() or "exhausted" in err_str.lower()):
+                logger.warning(
+                    "⚠️ Quota journalier épuisé pour gemini-2.5-flash ! Bascule automatique de l'agent sur gemini-flash-lite-latest..."
+                )
+                try:
+                    from agno.models.google import Gemini
+                    global LLM_MODEL
+                    LLM_MODEL = "gemini-flash-lite-latest"
+                    agent.model = Gemini(id="gemini-flash-lite-latest", api_key=GOOGLE_API_KEY)
+                    # Reset delay and retry immediately
+                    delay = initial_delay
+                    continue
+                except Exception as fallback_err:
+                    logger.error(f"Échec lors de la bascule vers gemini-flash-lite-latest : {fallback_err}")
+            
+            is_rate_limit = ("429" in err_str or "limit" in err_str.lower() or "exhausted" in err_str.lower() or "resource" in err_str.lower())
+            if attempt < max_retries - 1:
+                if is_rate_limit:
+                    logger.warning(
+                        f"Limite de requêtes atteinte (429). Attente de {delay}s "
+                        f"avant essai {attempt + 1}/{max_retries}..."
+                    )
+                    time.sleep(delay)
+                    delay *= 2
+                else:
+                    logger.warning(f"Erreur API ({err_str}). Essai {attempt + 1}/{max_retries} dans {delay}s...")
+                    time.sleep(delay)
+                    delay *= 1.5
+            else:
+                # Raise the error on the last attempt so we don't return an invalid schema
+                logger.error(f"Échec définitif de l'appel agent après {max_retries} essais : {err_str}")
+                raise e
 
 # =====================================================================
 # Exécuteur de requêtes IA
@@ -192,7 +259,7 @@ def query_llm_for_structuring(chunk_text: str, source_filename: str, category: s
     logger.info(f"Envoi du chunk ({len(chunk_text)} chars) a l'Agent Agno...")
 
     try:
-        response = agent.run(prompt)
+        response = run_agent_with_retry(agent, prompt)
         content = response.content
 
         # Agno with output_model returns the Pydantic object directly in content

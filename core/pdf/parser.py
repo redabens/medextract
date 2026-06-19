@@ -50,7 +50,7 @@ def extract_inline_correction(explanation_lines):
                 
         # Check if the line is exactly a letter combination, e.g. "D" or "BC"
         letters_only = re.sub(r'[\s,\+\.\)-]', '', line)
-        if re.match(r'^[A-E]{1,5}$', letters_only) and len(line.strip()) <= 10:
+        if re.match(r'^[A-G]{1,7}$', letters_only) and len(line.strip()) <= 10:
             ans = letters_only.upper()
             continue
             
@@ -132,7 +132,7 @@ def parse_pdf_to_qcm(pdf_path, category):
             prefix_text = m_end.group(1).strip()
             q_num = m_end.group(3)
             # Only treat as a question number if it is reasonably small (less than 200)
-            if int(q_num) < 200 and prefix_text and not re.match(r'^[A-E]$', prefix_text, re.IGNORECASE) and not prefix_text.isdigit():
+            if int(q_num) < 200 and prefix_text and not re.match(r'^[A-G]$', prefix_text, re.IGNORECASE) and not prefix_text.isdigit():
                 normalized_lines.append(f"{q_num}. {prefix_text}")
                 continue
         normalized_lines.append(line)
@@ -177,7 +177,7 @@ def parse_pdf_to_qcm(pdf_path, category):
     while i < len(lines):
         if (i + 1 < len(lines) and 
             re.match(r'^\d+[\.\)-]?$', lines[i]) and 
-            re.match(r'^[A-E]\b', lines[i+1])):
+            re.match(r'^[A-G]\b', lines[i+1])):
             
             num = re.sub(r'[\.\)-]', '', lines[i])
             merged_lines.append(f"{num}- {lines[i+1]}")
@@ -329,7 +329,7 @@ def parse_pdf_to_qcm(pdf_path, category):
                             "correction_images": []
                         }
                         # Map correction answer letters to final option bools
-                        correct_letters = re.findall(r'[A-E]', inline_corr["answer_letter"])
+                        correct_letters = re.findall(r'[A-G]', inline_corr["answer_letter"])
                         for opt in current_question["options"]:
                             if opt["letter"] in correct_letters:
                                 opt["is_correct"] = True
@@ -351,7 +351,8 @@ def parse_pdf_to_qcm(pdf_path, category):
                 "question_images": [],
                 "sub_propositions": [],
                 "options": [],
-                "correction": None
+                "correction": None,
+                "_raw_text": line
             }
             explanation_lines = []
             continue
@@ -377,6 +378,7 @@ def parse_pdf_to_qcm(pdf_path, category):
                 parsed_opts = []
                 
         if parsed_opts and current_question:
+            current_question["_raw_text"] += "\n" + line
             if len(parsed_opts) > 1:
                 # Check for K-Type shift: we already have options, and we receive a new set of multiple options starting with A
                 if current_question["options"] and parsed_opts[0]["letter"] == 'A':
@@ -403,6 +405,7 @@ def parse_pdf_to_qcm(pdf_path, category):
         # Detect K-type sub-proposition (1, 2, 3...)
         sub_match = sub_prop_regex.match(line)
         if sub_match and current_question and len(current_question["options"]) == 0:
+            current_question["_raw_text"] += "\n" + line
             sub_id = int(sub_match.group(1))
             sub_text = clean_text(sub_match.group(2))
             current_question["sub_propositions"].append({
@@ -417,6 +420,7 @@ def parse_pdf_to_qcm(pdf_path, category):
         if current_question:
             if len(current_question["options"]) > 0 or len(current_question["sub_propositions"]) > 0:
                 explanation_lines.append(line)
+                current_question["_raw_text"] += "\n" + line
                 continue
                 
         # Handle Clinical Case Text Updates/Context
@@ -429,6 +433,7 @@ def parse_pdf_to_qcm(pdf_path, category):
             else:
                 accumulated_context.append(line)
                 current_case["context_text"] += "\n[Mise à jour] " + line
+                current_question["_raw_text"] += "\n" + line
                 
     # Save the last question
     if current_question:
@@ -440,7 +445,7 @@ def parse_pdf_to_qcm(pdf_path, category):
                     "comment": inline_corr["comment"],
                     "correction_images": []
                 }
-                correct_letters = re.findall(r'[A-E]', inline_corr["answer_letter"])
+                correct_letters = re.findall(r'[A-G]', inline_corr["answer_letter"])
                 for opt in current_question["options"]:
                     if opt["letter"] in correct_letters:
                         opt["is_correct"] = True
@@ -451,7 +456,7 @@ def parse_pdf_to_qcm(pdf_path, category):
     # 3. Parse corrections from raw text block sequentially
     corrections = []
     # Simple regex to extract letter keys and comments from raw correction lines
-    corr_line_regex = re.compile(r'^(?:[qQ](?:[uU][eE][sS][tT][iI][oO][nN])?\s*)?(\d+)[\s\.:-]+([A-E]{1,5})(?:\s*[\.:-]\s*|\s+|$)(.*)')
+    corr_line_regex = re.compile(r'^(?:[qQ](?:[uU][eE][sS][tT][iI][oO][nN])?\s*)?(\d+)[\s\.:-]+([A-G]{1,7})(?:\s*[\.:-]\s*|\s+|$)(.*)')
     
     current_comment = []
     current_ans = ""
@@ -484,7 +489,7 @@ def parse_pdf_to_qcm(pdf_path, category):
         
     # If no structured corrections were parsed, attempt to parse simple grids like "1. A  2. B  3. C"
     if not corrections:
-        grid_matches = re.findall(r'\b(?:Q)?(\d+)[\s\.:-]+([A-E]{1,5})\b', "\n".join(corrections_raw))
+        grid_matches = re.findall(r'\b(?:Q)?(\d+)[\s\.:-]+([A-G]{1,7})\b', "\n".join(corrections_raw))
         for g in grid_matches:
             corrections.append({
                 "num": int(g[0]),
@@ -542,7 +547,7 @@ def parse_pdf_to_qcm(pdf_path, category):
                 }
                 
                 # Map correction answer letters to final option bools
-                correct_letters = re.findall(r'[A-E]', matching_corr["answer_letter"])
+                correct_letters = re.findall(r'[A-G]', matching_corr["answer_letter"])
                 for opt in question["options"]:
                     if opt["letter"] in correct_letters:
                         opt["is_correct"] = True

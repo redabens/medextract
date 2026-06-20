@@ -16,7 +16,7 @@ Pour obtenir un système qui s'adapte automatiquement à n'importe quel format s
 ```mermaid
 graph TD
     %% Architecture Actuelle
-    subgraph Architecture Actuelle (Fragile)
+    subgraph SG1 ["Architecture Actuelle (Fragile)"]
         A1[Fichier Word/PDF] --> B1[Parser déterministe local]
         B1 -->|Erreurs de structure / Regex brisées| C1[Validateur & Anomalies]
         C1 --> D1[Rattrapage & Raffinage IA]
@@ -24,15 +24,15 @@ graph TD
     end
 
     %% Architecture LLM-First Recommandée
-    subgraph Architecture LLM-First (Généralisée)
+    subgraph SG2 ["Architecture LLM-First (Généralisée)"]
         A2[Fichier Word/PDF] --> B2[Extraction physique brute : plain-text + tags + images]
         B2 --> C2[Structuring Agent : IA structure directement le texte]
         C2 --> D2[Post-processeur local : LaTeX & Images]
         D2 --> E2[JSON Final]
     end
     
-    style Architecture Actuelle (Fragile) fill:#ffe3e3,stroke:#ff8080
-    style Architecture LLM-First (Généralisée) fill:#e3ffe3,stroke:#80ff80
+    style SG1 fill:#ffe3e3,stroke:#ff8080
+    style SG2 fill:#e3ffe3,stroke:#80ff80
 ```
 
 ---

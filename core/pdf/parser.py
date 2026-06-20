@@ -7,10 +7,6 @@ from core.config import (
     CASE_START_REGEX,
     QUESTION_START_REGEX,
     SUB_PROP_REGEX,
-    CORR_LINE_REGEX,
-    INLINE_CORR_REP_REGEX,
-    INLINE_CORR_FIRST_LINE_REGEX,
-    INLINE_CORR_EXACT_REGEX,
     OPTION_LOOSE_PATTERN
 )
 from core.utils import (
@@ -20,92 +16,11 @@ from core.utils import (
     parse_options_line
 )
 from core.pdf.extractor import extract_pdf_media_and_text
+from core.pdf.preprocessor import normalize_pdf_lines
+from core.pdf.corrections import extract_inline_correction, parse_grid_corrections
+from core.post_processor import normalize_question_types, deduplicate_options
 
 logger = get_logger("pdf_parser")
-
-def extract_inline_correction(explanation_lines):
-    """
-    Given a list of explanation lines, attempts to extract the correct answer letters
-    and the explanation comment.
-    """
-    if not explanation_lines:
-        return None
-        
-    cleaned_lines = [line.strip() for line in explanation_lines if line.strip()]
-    if not cleaned_lines:
-        return None
-        
-    ans = None
-    comment_lines = []
-    
-    # 1. Search all lines for an exact match of key answer markers
-    for line in cleaned_lines:
-        # Check for "Réponse: AB" or "Correction: D" or "Corrigé D"
-        rep_match = INLINE_CORR_REP_REGEX.match(line)
-        if rep_match:
-            potential_ans = re.sub(r'[\s,\+]', '', rep_match.group(1)).upper()
-            if potential_ans and all(c in 'ABCDE' for c in potential_ans):
-                ans = potential_ans
-                continue
-                
-        # Check if the line is exactly a letter combination, e.g. "D" or "BC"
-        letters_only = re.sub(r'[\s,\+\.\)-]', '', line)
-        if re.match(r'^[A-G]{1,7}$', letters_only) and len(line.strip()) <= 10:
-            ans = letters_only.upper()
-            continue
-            
-        comment_lines.append(line)
-        
-    if ans:
-        return {
-            "answer_letter": "".join(sorted(list(set(ans)))),
-            "comment": "\n".join(comment_lines).strip()
-        }
-        
-    # 2. Check if the first line starts with the answer, e.g., "D Il donne..." or "34 D - La Clinique..."
-    first_line = cleaned_lines[0]
-    # Match optional digits at the start, then 1-5 letters A-E, then a separator or space
-    match = INLINE_CORR_FIRST_LINE_REGEX.match(first_line)
-    # Also support just digits followed by 1-5 letters exactly, e.g. "27 D"
-    match_exact = INLINE_CORR_EXACT_REGEX.match(first_line)
-    
-    if match_exact:
-        ans = match_exact.group(1).upper()
-        comment = ""
-        if len(cleaned_lines) > 1:
-            comment = "\n".join(cleaned_lines[1:])
-        return {
-            "answer_letter": "".join(sorted(list(set(ans)))),
-            "comment": comment.strip()
-        }
-        
-    if match:
-        ans = match.group(1).upper()
-        remaining_text = match.group(2).strip()
-        # Ensure it's not a false positive word starting with A-E
-        is_valid = (
-            re.match(r'^\d+\s+', first_line) or 
-            len(ans) > 1 or 
-            first_line.endswith(ans) or 
-            re.match(rf'^(?:\d+\s+)?{ans}\s+[\d-]', first_line, re.IGNORECASE) or
-            first_line.startswith(ans + " ") or 
-            first_line.startswith(ans + ".") or 
-            first_line.startswith(ans + "-") or 
-            first_line.startswith(ans + ":")
-        )
-        if is_valid:
-            comment = remaining_text
-            if len(cleaned_lines) > 1:
-                comment += "\n" + "\n".join(cleaned_lines[1:])
-            return {
-                "answer_letter": "".join(sorted(list(set(ans)))),
-                "comment": comment.strip()
-            }
-            
-    return {
-        "answer_letter": "",
-        "comment": "\n".join(cleaned_lines).strip()
-    }
 
 def parse_pdf_to_qcm(pdf_path, category):
     """
@@ -120,74 +35,11 @@ def parse_pdf_to_qcm(pdf_path, category):
     if not document_text:
         return []
         
-    lines = [clean_text(line) for line in document_text.split("\n")]
-    lines = [line for line in lines if line]
+    raw_lines = [clean_text(line) for line in document_text.split("\n") if line.strip()]
     
-    # Preprocess: move question numbers from the end of the line to the beginning (e.g., "toutes ces anomalies .30" -> "30. toutes ces anomalies")
-    normalized_lines = []
-    for line in lines:
-        # Require a punctuation separator (. or ) or -) before the number to avoid matching standard numbers like "type 2" or "35"
-        m_end = re.match(r'^(.*?)\s+([\.\)-])\s*(\d+)\s*$', line)
-        if m_end:
-            prefix_text = m_end.group(1).strip()
-            q_num = m_end.group(3)
-            # Only treat as a question number if it is reasonably small (less than 200)
-            if int(q_num) < 200 and prefix_text and not re.match(r'^[A-G]$', prefix_text, re.IGNORECASE) and not prefix_text.isdigit():
-                normalized_lines.append(f"{q_num}. {prefix_text}")
-                continue
-        normalized_lines.append(line)
-    lines = normalized_lines
+    # 2. Clean and preprocess lines (split/merge normalizations)
+    lines = normalize_pdf_lines(raw_lines)
     
-    # Preprocess: merge split question/correction numbers (layout artifacts)
-    i = 0
-    merged_lines = []
-    while i < len(lines):
-        # Check for 2-digit number split: digit, digit, ".", option/text
-        if (i + 3 < len(lines) and 
-            lines[i].isdigit() and len(lines[i]) == 1 and
-            lines[i+1].isdigit() and len(lines[i+1]) == 1 and
-            lines[i+2] == "." and
-            (len(lines[i+3]) >= 1 and (lines[i+3][0].isupper() or lines[i+3].startswith("-")))):
-            
-            num = lines[i] + lines[i+1]
-            opt_text = lines[i+3]
-            merged_lines.append(f"{num}. {opt_text}")
-            i += 4
-            
-        # Check for 1-digit number split: digit, ".", option/text
-        elif (i + 2 < len(lines) and 
-              lines[i].isdigit() and len(lines[i]) == 1 and
-              lines[i+1] == "." and
-              (len(lines[i+2]) >= 1 and (lines[i+2][0].isupper() or lines[i+2].startswith("-")))):
-              
-            num = lines[i]
-            opt_text = lines[i+2]
-            merged_lines.append(f"{num}. {opt_text}")
-            i += 3
-            
-        else:
-            merged_lines.append(lines[i])
-            i += 1
-            
-    lines = merged_lines
-
-    # Preprocess: merge table-split correction numbers and options (e.g. "1." on line i, then "B A-L'ARN..." on line i+1)
-    i = 0
-    merged_lines = []
-    while i < len(lines):
-        if (i + 1 < len(lines) and 
-            re.match(r'^\d+[\.\)-]?$', lines[i]) and 
-            re.match(r'^[A-G]\b', lines[i+1])):
-            
-            num = re.sub(r'[\.\)-]', '', lines[i])
-            merged_lines.append(f"{num}- {lines[i+1]}")
-            i += 2
-        else:
-            merged_lines.append(lines[i])
-            i += 1
-    lines = merged_lines
-    
-    # 2. Sequential parsing logic similar to docx but adapted for raw lines
     questions = []
     current_case = None
     current_question = None
@@ -195,74 +47,33 @@ def parse_pdf_to_qcm(pdf_path, category):
     explanation_lines = []
     detected_separator = None
     
-    # Simple regex rules for extraction
     case_start_regex = CASE_START_REGEX
     question_start_regex = QUESTION_START_REGEX
-    q_start_sep_regex = re.compile(r'^(\d+)([\.\)-])\s*(.*)')
     sub_prop_regex = SUB_PROP_REGEX
-    corr_line_regex = CORR_LINE_REGEX
     
-    # Keep track of correction section
-    correction_mode = False
+    # Identify index where corrections block starts
+    sep_idx = -1
+    for idx_l, line in enumerate(lines):
+        if re.search(r'^(?:CORRECTION|CORRIG[EÉ]|EXPLICATIONS|REPONSES|R[EÉ]PONSES)\b', line, re.IGNORECASE):
+            sep_idx = idx_l
+            detected_separator = line
+            break
+            
+    questions_raw = lines
     corrections_raw = []
     
-    for line in lines:
-        if "--- PAGE_SEPARATOR ---" in line:
-            continue
-            
-        # Detect if we reached the correction section at the end of PDF
-        # Ensure we only match stand-alone correction headers, not embedded text/options
-        is_corr_header = False
-        is_wrap_around_trigger = False
-        stripped_line = line.strip().lower()
-        if re.match(r'^(?:tableau\s+de\s+)?(?:correction|corrig[eé]s?|explications?)\b', stripped_line):
-            if len(stripped_line) < 40:
-                is_corr_header = True
-                
-        # Detect transition to correction mode by wrap-around question numbering (no explicit header case)
-        if not correction_mode and current_question:
-            m_corr = corr_line_regex.match(line)
-            if m_corr:
-                corr_num = int(m_corr.group(1))
-                if corr_num < 200 and corr_num < current_question["question_number"] - 5:
-                    # Check if this is actually a sub-proposition for the current question (false positive)
-                    is_false_positive = False
-                    if sub_prop_regex.match(line) and len(current_question["options"]) == 0:
-                        is_false_positive = True
-                        
-                    if not is_false_positive:
-                        logger.info(f"[{filename}] Détection automatique de la section correction par réinitialisation du numéro ({current_question['question_number']} -> {corr_num})")
-                        is_corr_header = True
-                        is_wrap_around_trigger = True
-                
-        if is_corr_header:
-            correction_mode = True
-            if is_wrap_around_trigger:
-                corrections_raw.append(line)
-            continue
-            
-        if correction_mode:
-            # Check if this line looks like a sequential new question starting, e.g. "61. Instruction..."
-            # which would signal that we are exiting a correction block and entering a new question block
-            q_match = question_start_regex.match(line)
-            if q_match and current_question:
-                q_num = int(q_match.group(1))
-                if q_num < 200 and q_num > current_question["question_number"] and q_num <= current_question["question_number"] + 5:
-                    logger.info(f"[{filename}] Détection de sortie de la section correction vers la question {q_num}")
-                    correction_mode = False
-            
-            if correction_mode:
-                # Accumulate raw correction text
-                corrections_raw.append(line)
-                continue
-            
-        # Detect end of clinical case
+    if sep_idx != -1:
+        logger.info(f"[{filename}] Séparateur de corrections détecté à la ligne {sep_idx} : '{detected_separator}'")
+        questions_raw = lines[:sep_idx]
+        corrections_raw = lines[sep_idx+1:]
+        
+    # Main state-machine parsing loop
+    for line in questions_raw:
         if "fin du cas clinique" in line.lower():
             current_case = None
             accumulated_context = []
             continue
             
-        # Detect start of clinical case
         if case_start_regex.match(line):
             current_case = {
                 "case_id": hashlib.md5(line.encode('utf-8')).hexdigest()[:12],
@@ -272,54 +83,28 @@ def parse_pdf_to_qcm(pdf_path, category):
             accumulated_context = []
             continue
             
-        # Detect start of question
-        sep_match = q_start_sep_regex.match(line)
-        is_legit_q = False
-        if sep_match:
-            q_num = int(sep_match.group(1))
-            if q_num >= 200:
-                continue
-            q_sep = sep_match.group(2)
-            q_instruction = clean_text(sep_match.group(3))
+        q_match = question_start_regex.match(line)
+        if q_match:
+            q_num = int(q_match.group(1))
+            q_instruction = clean_text(q_match.group(2))
             
-            # Set or verify separator consistency to filter out fake questions using different separators
-            if detected_separator is None:
-                detected_separator = q_sep
+            is_sub_prop = False
+            if current_question and len(current_question["options"]) == 0 and 1 <= q_num <= 5:
+                is_sub_prop = True
                 
-            if q_sep == detected_separator:
-                # Rollback logic for empty fake questions when out-of-sequence numbering is found
-                last_q_num = current_question["question_number"] if current_question else (questions[-1]["question_number"] if questions else 0)
-                if current_question and (q_num <= last_q_num or q_num > last_q_num + 5):
-                    if len(current_question["options"]) == 0 and len(current_question["sub_propositions"]) == 0:
-                        logger.info(f"[{filename}] Rollback: abandon de la question vide Q{current_question['question_number']} ({current_question['instruction'][:30]}...)")
-                        current_question = None
-                        while questions and len(questions[-1]["options"]) == 0 and len(questions[-1]["sub_propositions"]) == 0:
-                            popped = questions.pop()
-                            logger.info(f"[{filename}] Rollback: retrait de la question vide Q{popped['question_number']} de la liste")
-                
-                # K-Type proposition (1-5) collision check (must be checked after rollback)
-                is_sub_prop = False
-                if current_question and len(current_question["options"]) == 0 and 1 <= q_num <= 5:
-                    is_sub_prop = True
-                    
-                if is_sub_prop:
+            if is_sub_prop:
+                if len(current_question["options"]) == 0:
                     current_question["sub_propositions"].append({
                         "id": q_num,
                         "text": q_instruction,
                         "is_true": None
                     })
                     current_question["question_type"] = "K_TYPE"
-                    continue
-                    
-                # Verify sequential validity (must be monotonic and within a window of 5)
-                last_q_num = current_question["question_number"] if current_question else (questions[-1]["question_number"] if questions else 0)
-                if current_question is None or (q_num > last_q_num and q_num <= last_q_num + 5):
-                    is_legit_q = True
+                    current_question["_raw_text"] += "\n" + line
+                continue
                 
-        if is_legit_q:
-            # Save preceding question
+            # Save previous question
             if current_question:
-                # Process and attach inline correction if accumulated
                 if explanation_lines:
                     inline_corr = extract_inline_correction(explanation_lines)
                     if inline_corr:
@@ -328,7 +113,6 @@ def parse_pdf_to_qcm(pdf_path, category):
                             "comment": inline_corr["comment"],
                             "correction_images": []
                         }
-                        # Map correction answer letters to final option bools
                         correct_letters = re.findall(r'[A-G]', inline_corr["answer_letter"])
                         for opt in current_question["options"]:
                             if opt["letter"] in correct_letters:
@@ -337,7 +121,6 @@ def parse_pdf_to_qcm(pdf_path, category):
                             current_question["question_type"] = "MULTIPLE_CHOICE"
                 questions.append(current_question)
                 
-            # Initialize new question
             current_question = {
                 "source_file": filename,
                 "category": category,
@@ -357,14 +140,17 @@ def parse_pdf_to_qcm(pdf_path, category):
             explanation_lines = []
             continue
             
-        # Detect option (A, B, C...)
         parsed_opts = parse_options_line(line)
         if not parsed_opts and current_question:
             next_letter = 'A'
             if current_question["options"]:
                 last_letter = current_question["options"][-1]["letter"]
                 next_letter = chr(ord(last_letter) + 1)
-            loose_match = re.match(OPTION_LOOSE_PATTERN.format(letter=next_letter), line.strip(), re.IGNORECASE)
+            loose_match = re.match(
+                OPTION_LOOSE_PATTERN.format(letter=next_letter), line.strip()
+            ) or re.match(
+                OPTION_LOOSE_PATTERN.format(letter=next_letter.lower()), line.strip(), re.IGNORECASE
+            )
             if loose_match:
                 parsed_opts = [{
                     "letter": loose_match.group(1).upper(),
@@ -373,24 +159,16 @@ def parse_pdf_to_qcm(pdf_path, category):
                 }]
                 
         if parsed_opts and current_question:
-            # Avoid duplicate option letters or out-of-order corrections being matched as options
-            if any(opt["letter"] == o["letter"] for o in parsed_opts for opt in current_question["options"]):
-                parsed_opts = []
-                
-        if parsed_opts and current_question:
             current_question["_raw_text"] += "\n" + line
             if len(parsed_opts) > 1:
-                # Check for K-Type shift: we already have options, and we receive a new set of multiple options starting with A
                 if current_question["options"] and parsed_opts[0]["letter"] == 'A':
-                    # Shift existing options to sub_propositions
                     current_question["sub_propositions"] = []
-                    for idx, opt in enumerate(current_question["options"]):
+                    for idx_opt, opt in enumerate(current_question["options"]):
                         current_question["sub_propositions"].append({
-                            "id": idx + 1,
+                            "id": idx_opt + 1,
                             "text": opt["text"],
                             "is_true": None
                         })
-                    # Overwrite options with the new ones
                     current_question["options"] = parsed_opts
                     current_question["question_type"] = "K_TYPE"
                 else:
@@ -402,7 +180,6 @@ def parse_pdf_to_qcm(pdf_path, category):
                     current_question["options"].extend(parsed_opts)
             continue
             
-        # Detect K-type sub-proposition (1, 2, 3...)
         sub_match = sub_prop_regex.match(line)
         if sub_match and current_question and len(current_question["options"]) == 0:
             current_question["_raw_text"] += "\n" + line
@@ -416,14 +193,12 @@ def parse_pdf_to_qcm(pdf_path, category):
             current_question["question_type"] = "K_TYPE"
             continue
             
-        # Accumulate inline correction / explanation text
         if current_question:
             if len(current_question["options"]) > 0 or len(current_question["sub_propositions"]) > 0:
                 explanation_lines.append(line)
                 current_question["_raw_text"] += "\n" + line
                 continue
                 
-        # Handle Clinical Case Text Updates/Context
         if current_case:
             if not current_question:
                 if current_case["context_text"]:
@@ -435,7 +210,7 @@ def parse_pdf_to_qcm(pdf_path, category):
                 current_case["context_text"] += "\n[Mise à jour] " + line
                 current_question["_raw_text"] += "\n" + line
                 
-    # Save the last question
+    # Save last question
     if current_question:
         if explanation_lines:
             inline_corr = extract_inline_correction(explanation_lines)
@@ -453,81 +228,19 @@ def parse_pdf_to_qcm(pdf_path, category):
                     current_question["question_type"] = "MULTIPLE_CHOICE"
         questions.append(current_question)
         
-    # 3. Parse corrections from raw text block sequentially
-    corrections = []
-    # Simple regex to extract letter keys and comments from raw correction lines
-    corr_line_regex = re.compile(r'^(?:[qQ](?:[uU][eE][sS][tT][iI][oO][nN])?\s*)?(\d+)[\s\.:-]+([A-G]{1,7})(?:\s*[\.:-]\s*|\s+|$)(.*)')
-    
-    current_comment = []
-    current_ans = ""
-    current_num = -1
-    
-    for c_line in corrections_raw:
-        m = corr_line_regex.match(c_line)
-        if m:
-            # If we had a previous correction, save it
-            if current_num != -1:
-                corrections.append({
-                    "num": current_num,
-                    "answer_letter": current_ans,
-                    "comment": "\n".join(current_comment).strip()
-                })
-            current_num = int(m.group(1))
-            current_ans = m.group(2)
-            current_comment = [m.group(3)]
-        else:
-            if current_num != -1:
-                current_comment.append(c_line)
-                
-    # Save the last correction
-    if current_num != -1:
-        corrections.append({
-            "num": current_num,
-            "answer_letter": current_ans,
-            "comment": "\n".join(current_comment).strip()
-        })
-        
-    # If no structured corrections were parsed, attempt to parse simple grids like "1. A  2. B  3. C"
-    if not corrections:
-        grid_matches = re.findall(r'\b(?:Q)?(\d+)[\s\.:-]+([A-G]{1,7})\b', "\n".join(corrections_raw))
-        for g in grid_matches:
-            corrections.append({
-                "num": int(g[0]),
-                "answer_letter": g[1],
-                "comment": "Explication non détaillée."
-            })
-            
+    # 3. Parse grid corrections
+    corrections = parse_grid_corrections(corrections_raw)
     logger.info(f"[{filename}] PDF Questions détectées: {len(questions)}, Corrections trouvées: {len(corrections)}")
     
-    # Normalize question types and deduplicate options before pairing
-    for question in questions:
-        # K_TYPE without sub_propositions → downgrade to SINGLE/MULTIPLE_CHOICE
-        if question["question_type"] == "K_TYPE" and not question.get("sub_propositions"):
-            n_opts = len(question["options"])
-            question["question_type"] = "MULTIPLE_CHOICE" if n_opts > 1 else "SINGLE_CHOICE"
+    # 4. Shared Normalization & Deduplication
+    questions = normalize_question_types(questions)
+    questions = deduplicate_options(questions)
 
-        # Deduplicate options: if same letter appears twice (parsing artefact), keep the longer text version
-        seen_letters = {}
-        deduped = []
-        for opt in question["options"]:
-            letter = opt["letter"]
-            if letter not in seen_letters:
-                seen_letters[letter] = opt
-                deduped.append(opt)
-            else:
-                # Keep the option with the longer text (more informative)
-                if len(opt["text"]) > len(seen_letters[letter]["text"]):
-                    idx_existing = next(i for i, o in enumerate(deduped) if o["letter"] == letter)
-                    deduped[idx_existing] = opt
-                    seen_letters[letter] = opt
-        question["options"] = deduped
-
-    # Sort corrections by their number for sequential mapping
+    # Sort corrections for sequential fallback mapping
     corrections.sort(key=lambda x: x["num"])
     
-    # 4. Pair questions with corrections (sequential or by matching number)
+    # 5. Pair questions with corrections
     for idx, question in enumerate(questions):
-        # Find correction by question number if possible, or fall back to index matching
         matching_corr = None
         for corr in corrections:
             if corr["num"] == question["question_number"]:
@@ -538,25 +251,19 @@ def parse_pdf_to_qcm(pdf_path, category):
             matching_corr = corrections[idx]
             
         if matching_corr:
-            # Overwrite only if question correction is not yet populated OR has no answer letters
             if not question.get("correction") or not question["correction"].get("answer_letter"):
                 question["correction"] = {
                     "answer_letter": matching_corr["answer_letter"],
                     "comment": matching_corr["comment"],
                     "correction_images": []
                 }
-                
-                # Map correction answer letters to final option bools
                 correct_letters = re.findall(r'[A-G]', matching_corr["answer_letter"])
                 for opt in question["options"]:
                     if opt["letter"] in correct_letters:
                         opt["is_correct"] = True
-                        
-                # Auto-deduce type if multiple letters in standard choice
                 if len(correct_letters) > 1 and question["question_type"] != "K_TYPE":
                     question["question_type"] = "MULTIPLE_CHOICE"
             else:
-                # Merge or prefer tail correction comment if it's richer and not generic
                 if matching_corr["comment"] and matching_corr["comment"] != "Explication non détaillée.":
                     if not question["correction"].get("comment") or len(matching_corr["comment"]) > len(question["correction"]["comment"]):
                         question["correction"]["comment"] = matching_corr["comment"]
@@ -568,10 +275,8 @@ def parse_pdf_to_qcm(pdf_path, category):
                     "correction_images": []
                 }
             
-    # 5. Finalize PDF image references
+    # 6. Finalize PDF image references
     for q in questions:
-        # Search all fields for images references [[IMG_...]]
-        # If an image placeholder is present, add it to question_images list and set has_image to True
         img_placeholders = []
         if q["instruction"]:
             img_placeholders.extend(re.findall(r'\[\[(IMG_[a-f0-9]+_P\d+_I\d+)\]\]', q["instruction"]))
@@ -580,14 +285,11 @@ def parse_pdf_to_qcm(pdf_path, category):
         if q["case_study"]:
             img_placeholders.extend(re.findall(r'\[\[(IMG_[a-f0-9]+_P\d+_I\d+)\]\]', q["case_study"]["context_text"]))
             
-        # Also check options
         for opt in q["options"]:
             img_placeholders.extend(re.findall(r'\[\[(IMG_[a-f0-9]+_P\d+_I\d+)\]\]', opt["text"]))
             
         if img_placeholders:
-            # Populate images list
             q["has_image"] = True
-            # Find extension for these images in IMAGE_DIR
             for placeholder in set(img_placeholders):
                 found_filename = None
                 for ext in [".png", ".jpg", ".jpeg", ".gif"]:
@@ -598,10 +300,8 @@ def parse_pdf_to_qcm(pdf_path, category):
                 if found_filename:
                     q["question_images"].append(found_filename)
                 else:
-                    # Append default placeholder extension
                     q["question_images"].append(f"{placeholder}.png")
                     
-        # Also check correction comment for image placeholders
         corr_placeholders = []
         if q["correction"] and q["correction"].get("comment"):
             corr_placeholders.extend(re.findall(r'\[\[(IMG_[a-f0-9]+_P\d+_I\d+)\]\]', q["correction"]["comment"]))

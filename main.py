@@ -1,27 +1,18 @@
 """
 MedExtract-API — Main Orchestrator
 ===================================
-Dual-mode extraction pipeline:
-
-  MODE 1 (USE_LLM = False)  →  Fast rule-based parser (Epic 01)
-  MODE 2 (USE_LLM = True)   →  Agno LLM structuring engine (Epic 02)
+Orchestration of medical QCM extraction.
 
 Usage examples
 --------------
-  # All files in default directory, rule-based mode:
-  python main.py
+  # Rule-based offline mode:
+  python main.py --file "QCM Medicale/Uploaded/Qcms.docx" --rules
 
-  # Single file, rule-based:
-  python main.py --file "QCM Medicale/Ex cas clinique 01.docx"
+  # Rules-First Hybrid mode:
+  python main.py --file "QCM Medicale/Uploaded/Qcms.docx" --hybrid-rules
 
-  # Single file, LLM mode (requires OPENAI_API_KEY in .env):
-  python main.py --file "QCM Medicale/Ex cas clinique 01.docx" --llm
-
-  # Full directory in LLM mode:
-  python main.py --dir "QCM Medicale" --llm
-
-  # Override detected category:
-  python main.py --file "..." --category "Pneumologie"
+  # LLM-First Hybrid mode:
+  python main.py --file "QCM Medicale/Uploaded/Qcms.docx" --hybrid-llm
 """
 
 import os
@@ -29,9 +20,9 @@ import sys
 import json
 import argparse
 
-from core.config import get_logger, OUTPUT_DIR, IMAGE_DIR, USE_LLM
+from core.config import get_logger, OUTPUT_DIR, IMAGE_DIR
 
-# ─── Rule-based parsers (Epic 01) ────────────────────────────────────────────
+# ─── Offline Rule-based parsers ──────────────────────────────────────────────
 from core.docx import parse_docx_to_qcm
 from core.pdf  import parse_pdf_to_qcm
 
@@ -39,54 +30,67 @@ from core.pdf  import parse_pdf_to_qcm
 from core.category import auto_deduce_category
 from core.validator import validate_qcm_structure
 
-# ─── LLM & Hybrid pipelines (Epic 02) ────────────────────────────────────────
-from core.llm_pipeline import run_llm_pipeline, run_hybrid_pipeline
+# ─── Hybrid Orchestrators ────────────────────────────────────────────────────
+from core.hybrid_rules_pipeline import run_hybrid_rules_pipeline
+from core.hybrid_llm_pipeline import run_hybrid_llm_pipeline
 
 logger = get_logger("main_orchestrator")
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Main Entry Point
-# ─────────────────────────────────────────────────────────────────────────────
 
 def main():
     cli = argparse.ArgumentParser(
         description=(
             "MedExtract-API — Pipeline d'extraction de QCM médicaux DOCX/PDF.\n"
-            "Supporte trois modes : règles hors-ligne, hybride coopératif ou Agent IA LLM pure."
+            "Supporte trois modes : règles locales, hybride rules-first (coopératif) ou hybride llm-first."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
     cli.add_argument("--file",     type=str, help="Chemin du fichier unique (.docx ou .pdf) à extraire.")
     cli.add_argument("--dir",      type=str, help="Chemin du dossier contenant les fichiers QCM.")
     cli.add_argument("--category", type=str, help="Catégorie médicale forcée (écrase la déduction automatique).")
+    
+    # Modes selection
     cli.add_argument(
-        "--llm", action="store_true",
-        help="Active le moteur de structuration IA Agno de zéro (nécessite OPENAI_API_KEY)."
+        "--rules", action="store_true",
+        help="Active le parser déterministe local par règles hors-ligne."
     )
     cli.add_argument(
+        "--hybrid-rules", action="store_true",
+        help="Active la pipeline Hybride Rules-First (parser local + micro-rattrapage Gemini)."
+    )
+    cli.add_argument(
+        "--hybrid-llm", action="store_true",
+        help="Active la pipeline Hybride LLM-First (extraction brute + structuration IA + ré-ancrage)."
+    )
+    
+    # Backward compatibility mapping
+    cli.add_argument(
         "--hybrid", action="store_true",
-        help="Active la pipeline hybride coopérative (parser local + micro-rattrapage Gemini)."
+        help="Alias de --hybrid-rules"
     )
 
     args = cli.parse_args()
 
-    # Resolve execution mode
-    use_llm_mode: bool = args.llm
-    use_hybrid_mode: bool = args.hybrid
-
-    if use_llm_mode:
-        logger.info("=" * 60)
-        logger.info("  MODE : Agent Agno LLM pur (De zéro)")
-        logger.info("=" * 60)
-    elif use_hybrid_mode:
-        logger.info("=" * 60)
-        logger.info("  MODE : Hybride Coopératif (Recommandé)")
-        logger.info("=" * 60)
+    # Determine mode
+    mode = "rules"
+    if args.hybrid_llm:
+        mode = "hybrid-llm"
+    elif args.hybrid_rules or args.hybrid:
+        mode = "hybrid-rules"
+    elif args.rules:
+        mode = "rules"
     else:
-        logger.info("=" * 60)
+        # Default mode is hybrid-rules if none specified
+        mode = "hybrid-rules"
+
+    logger.info("=" * 60)
+    if mode == "hybrid-llm":
+        logger.info("  MODE : Hybride Auto-Adaptatif (LLM-First) [Robuste]")
+    elif mode == "hybrid-rules":
+        logger.info("  MODE : Hybride Coopératif (Rules-First) [Par défaut]")
+    else:
         logger.info("  MODE : Parser par règles hors-ligne")
-        logger.info("=" * 60)
+    logger.info("=" * 60)
 
     # ── Collect input files ───────────────────────────────────────────────────
     input_file = args.file
@@ -132,14 +136,11 @@ def main():
         logger.info(f"[>] Traitement : {filename}  [Categorie : {category}]")
 
         try:
-            if use_llm_mode:
-                # ── Epic 02: LLM pipeline ─────────────────────────────────
-                questions = run_llm_pipeline(filepath, filename, category)
-            elif use_hybrid_mode:
-                # ── Hybrid Cooperative Pipeline ───────────────────────────
-                questions = run_hybrid_pipeline(filepath, filename, category)
+            if mode == "hybrid-llm":
+                questions = run_hybrid_llm_pipeline(filepath, filename, category)
+            elif mode == "hybrid-rules":
+                questions = run_hybrid_rules_pipeline(filepath, filename, category)
             else:
-                # ── Epic 01: Rule-based pipeline ──────────────────────────
                 if ext_lower.endswith(".docx"):
                     questions = parse_docx_to_qcm(filepath, category)
                 elif ext_lower.endswith(".pdf"):
@@ -163,15 +164,8 @@ def main():
         json.dump(all_extracted_questions, f, ensure_ascii=False, indent=2)
 
     # ── Summary report ────────────────────────────────────────────────────────
-    if use_llm_mode:
-        mode_label = "IA LLM pur"
-    elif use_hybrid_mode:
-        mode_label = "Hybride Coopératif"
-    else:
-        mode_label = "Règles hors-ligne"
-        
     logger.info("=" * 60)
-    logger.info(f"  Extraction terminee - Mode : {mode_label}")
+    logger.info(f"  Extraction terminee - Mode : {mode}")
     logger.info(f"  Fichiers traites    : {len(files_to_process)}")
     logger.info(f"  Total questions     : {len(all_extracted_questions)}")
     logger.info(f"  Questions valides   : {valid_count}")
@@ -188,7 +182,6 @@ def main():
         logger.info("  [OK] Aucun avertissement de structure detecte.")
     logger.info("=" * 60)
 
-    # Exit with non-zero code if there are structural errors (useful for CI)
     sys.exit(0 if not errors else 1)
 
 

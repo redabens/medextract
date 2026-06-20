@@ -12,31 +12,59 @@ Le projet adopte une architecture modulaire propre et découplée pour isoler le
 
 ```mermaid
 graph TD
-    A[main.py: CLI Orchestrator] --> B[core/category.py: Categorie Deducer]
-    A --> C[core/validator.py: QCM Validator]
-    A --> D[core/llm_pipeline.py: LLM Orchestrator]
-    A --> E[core/docx: DOCX Package]
-    A --> F[core/pdf: PDF Package]
-    
-    subgraph Core Engine
-        E --> G[core/omml_converter.py: OMML to LaTeX]
-        E --> H[core/utils.py: Shared Helpers]
+    %% CLI / Orchestration
+    subgraph SG1 ["1. Orchestration & Validation"]
+        A[main.py: CLI Orchestrator]
+        B[core/category.py: Category Deducer]
+        C[core/validator.py: QCM Validator]
+        
+        A --> B
+        A --> C
+    end
+
+    %% Processing Pipelines
+    subgraph SG2 ["2. Extraction Pipelines"]
+        D[core/llm_pipeline.py: LLM & Hybrid Orchestrator]
+        E[core/docx: DOCX Package]
+        F[core/pdf: PDF Package]
+        
+        A --> D
+        A --> E
+        A --> F
+    end
+
+    %% Helper Subsystem
+    subgraph SG3 ["3. Shared Engine Helpers"]
+        G[core/omml_converter.py: OMML to LaTeX]
+        H[core/utils.py: Shared Helpers]
+        I[core/config.py: Configuration & Regex]
+        
+        E --> G
+        E --> H
         F --> H
-        I[core/config.py: Configuration & Regex] --> E
+        I --> E
         I --> F
-        I --> H
     end
-    
-    subgraph LLM Subsystem
-        D --> J[core/chunker.py: Chunker]
-        D --> K[core/llm_engine.py: Agno Structurer]
-        D --> N[core/hybrid_refiner.py: Hybrid Refiner & Salvager]
+
+    %% LLM & Agents Subsystem
+    subgraph SG4 ["4. AI & Agent Subsystem"]
+        J[core/chunker.py: Chunker]
+        K[core/llm_engine.py: Agno Structurer]
+        N[core/hybrid_refiner.py: Hybrid Refiner & Salvager]
+        
+        D --> J
+        D --> K
+        D --> N
     end
-    
-    subgraph Outputs
-        E -.-> L[(output/images/)]
+
+    %% Outputs
+    subgraph SG5 ["5. Output Storage"]
+        L[(output/images/)]
+        M[output/extracted_qcm.json]
+        
+        E -.-> L
         F -.-> L
-        A -.-> M[output/extracted_qcm.json]
+        A -.-> M
     end
 ```
 

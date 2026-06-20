@@ -30,6 +30,7 @@ graph TD
     subgraph LLM Subsystem
         D --> J[core/chunker.py: Chunker]
         D --> K[core/llm_engine.py: Agno Structurer]
+        D --> N[core/hybrid_refiner.py: Hybrid Refiner & Salvager]
     end
     
     subgraph Outputs
@@ -59,39 +60,46 @@ Chaque module au sein de `core/` répond à une responsabilité unique :
 
 ### 4. [core/llm_pipeline.py](file:///c:/Users/redab/Desktop/ProjetWordMedicale/core/llm_pipeline.py) (LLM Subsystem Orchestrator)
 *   **Rôle** : Orchestre le flux de traitement par Intelligence Artificielle.
-*   **Logique** : Découpe le texte extrait via [core/chunker.py](file:///c:/Users/redab/Desktop/ProjetWordMedicale/core/chunker.py), soumet les blocs à l'agent IA structuré de [core/llm_engine.py](file:///c:/Users/redab/Desktop/ProjetWordMedicale/core/llm_engine.py), convertit les objets Pydantic en dictionnaires natifs et résout les placeholders d'images avec les extensions appropriées.
+*   **Logique** : Gère l'extraction complète via IA, ou orchestre la pipeline hybride coopérative en combinant le parsing local et les micro-agents de rattrapage/raffinage.
 
-### 5. [core/category.py](file:///c:/Users/redab/Desktop/ProjetWordMedicale/core/category.py) (Category Deducer)
+### 5. [core/hybrid_refiner.py](file:///c:/Users/redab/Desktop/ProjetWordMedicale/core/hybrid_refiner.py) (Hybrid Logic Refiner & Salvager)
+*   **Rôle** : Raffinage logique et rattrapage intelligent (micro-agents).
+*   **Logique** : 
+    *   **Salvage Agent** : Extrait proprement les instructions et les options pour les questions en anomalie, en garantissant un format alphabétique strict (A-E) sans affecter les corrections valides trouvées localement.
+    *   **Refinement Agent** : Déduit et aligne le type logique (`logic_type`: `POSITIVE` ou `NEGATIVE`) et qualifie la véracité des sous-propositions pour les questions de type `K_TYPE` à partir de l'explication clinique.
+    *   **Pairing Agent** : Apparie sémantiquement les questions et corrections pour éliminer les décalages en cascade.
+
+### 6. [core/category.py](file:///c:/Users/redab/Desktop/ProjetWordMedicale/core/category.py) (Category Deducer)
 *   **Rôle** : Déduction de spécialité médicale.
 *   **Logique** : Analyse le nom du fichier source à l'aide de correspondances de mots-clés prédéfinis pour lui attribuer sa catégorie (ex: Pneumologie, Cardiologie).
 
-### 6. [core/validator.py](file:///c:/Users/redab/Desktop/ProjetWordMedicale/core/validator.py) (QCM Validator)
+### 7. [core/validator.py](file:///c:/Users/redab/Desktop/ProjetWordMedicale/core/validator.py) (QCM Validator)
 *   **Rôle** : Validation de la conformité du modèle.
-*   **Logique** : Inspecte la structure de chaque question extraite. Vérifie la présence des champs obligatoires, la non-vacuité des options, la validité de la clé de correction et la cohérence des questions de type K-TYPE.
+*   **Logique** : Inspecte la structure de chaque question extraite. Vérifie la présence des champs obligatoires, la non-vacuité des options, la validité de la clé de correction et la cohérence des questions de type K-TYPE. Il utilise un index unique basé sur la position (`q_idx`) plutôt que le numéro de question, permettant de gérer les documents contenant plusieurs QCMs indépendants avec des numérotations répétées (ex: plusieurs questions N°1).
 
-### 7. [core/omml_converter.py](file:///c:/Users/redab/Desktop/ProjetWordMedicale/core/omml_converter.py) (MathML to LaTeX)
+### 8. [core/omml_converter.py](file:///c:/Users/redab/Desktop/ProjetWordMedicale/core/omml_converter.py) (MathML to LaTeX)
 *   **Rôle** : Traducteur de formules scientifiques.
 *   **Logique** : Analyse récursivement l'arbre XML des balises Office Math Markup Language (OMML) de Word et le convertit en chaînes LaTeX standard (indices, exposants, fractions).
 
-### 8. [core/utils.py](file:///c:/Users/redab/Desktop/ProjetWordMedicale/core/utils.py) (Shared Helpers)
+### 9. [core/utils.py](file:///c:/Users/redab/Desktop/ProjetWordMedicale/core/utils.py) (Shared Helpers)
 *   **Rôle** : Fonctions d'aide transversales.
-*   **Logique** : Fournit le nettoyage de chaînes UTF-8, le hachage stable de fichiers et le découpage de lignes d'options multiples (inline options).
+*   **Logique** : Fournit le nettoyage de chaînes UTF-8, le hachage stable de fichiers et le découpage de lignes d'options multiples (inline options). Suporte désormais les espaces optionnels devant les séparateurs de propositions (ex: `A : `).
 
 ---
 
 ## 📊 Diagrammes de Scénarios et Flux
 
 ### 1. Diagramme de Flux de Traitement d'un Document
-Ce diagramme montre le cheminement de traitement d'un fichier du début à la fin de la pipeline :
+Ce diagramme montre le cheminement de traitement d'un fichier du début à la fin de la pipeline selon le mode d'extraction choisi :
 
 ```mermaid
 flowchart TD
     Start([Lancement Pipeline]) --> CommandInput[CLI / Fichier ou Dossier]
     CommandInput --> DeduceCat[core/category: Déduction Catégorie]
-    DeduceCat --> ModeCheck{Mode LLM activé ?}
+    DeduceCat --> ModeCheck{Quel mode d'extraction ?}
     
     %% Mode Règles
-    ModeCheck -->|Non| RulesCheck{Extension ?}
+    ModeCheck -->|Règles hors-ligne| RulesCheck{Extension ?}
     RulesCheck -->|.docx| DOCXRules[core/docx/parser: parse_docx_to_qcm]
     RulesCheck -->|.pdf| PDFRules[core/pdf/parser: parse_pdf_to_qcm]
     
@@ -103,17 +111,28 @@ flowchart TD
     PDFSpatial --> PDF_SM[core/pdf/parser: State-Machine Coordonnées]
     PDF_SM --> PDFAnchors[Ancrage Spatial des Images]
     
-    %% Mode LLM
-    ModeCheck -->|Oui| LLMPipe[core/llm_pipeline: run_llm_pipeline]
+    %% Mode LLM Pur
+    ModeCheck -->|IA LLM Pur| LLMPipe[core/llm_pipeline: run_llm_pipeline]
     LLMPipe --> RawExtract[Extraction brute du texte]
     RawExtract --> Chunker[core/chunker: Segmentation sémantique]
     Chunker --> AgnoEngine[core/llm_engine: Agno Agent & Gemini/OpenAI]
     AgnoEngine --> ResolveImages[Résolution physique des placeholders d'images]
-
+    
+    %% Mode Hybride
+    ModeCheck -->|Hybride Coopératif| HybridPipe[core/llm_pipeline: run_hybrid_pipeline]
+    HybridPipe --> LocalParse[Parser local déterministe règles]
+    LocalParse --> ValidatorCheck[core/validator: validate_qcm_structure]
+    ValidatorCheck --> AnomaliesCheck{Anomalies détectées ?}
+    
+    AnomaliesCheck -->|Oui| SalvageAgent[core/hybrid_refiner: salvage_failed_questions]
+    AnomaliesCheck -->|Non| RefineLogic[core/hybrid_refiner: refine_questions_logic_and_ktype]
+    SalvageAgent --> RefineLogic
+    
     %% Validation & Fin
     DOCX_SM --> Combine[Regroupement Questions]
     PDF_SM --> Combine
     ResolveImages --> Combine
+    RefineLogic --> Combine
     
     Combine --> Validation[core/validator: validate_qcm_structure]
     Validation --> Save[Sauvegarde dans output/extracted_qcm.json]
@@ -236,6 +255,27 @@ Ajoutez le drapeau `--llm` pour activer le moteur IA :
 #### Exécuter le pipeline LLM sur un dossier complet :
 ```bash
 .venv\Scripts\python.exe main.py --dir "QCM Medicale" --llm
+```
+
+### Mode 3 : Extraction Hybride Coopérative (Recommandée) 🌟
+
+Le mode hybride est le mode le plus robuste de MedExtract-API. Il combine la rapidité et la fidélité de positionnement (LaTeX, images) du parser par règles local hors-ligne avec la compréhension sémantique de Gemini pour rattraper les anomalies locales.
+
+#### Avantages :
+1. **Zéro Regroupement Abusif** : Utilise l'index de liste (`q_idx`) pour éviter la collision de numéros de questions identiques au sein d'une même banque d'examens.
+2. **Robustesse Punctuation** : Gère les espaces de formatage exotiques (`A : `) grâce à la tolérance regex.
+3. **Rattrapage Intelligent** : Les questions en anomalie structurelle sont envoyées au **Salvage Agent** de Gemini qui ré-extrait proprement l'instruction et les options sans altérer le reste du document.
+4. **Validation logique** : Qualifie le type de question (RJ/RF, K-Type) et déduit le statut des sous-propositions (vrai/faux) grâce au **Refinement Agent**.
+
+#### Exécuter le pipeline Hybride sur un fichier :
+Ajoutez le drapeau `--hybrid` :
+```bash
+.venv\Scripts\python.exe main.py --file "QCM Medicale/Uploaded/Qcms.docx" --hybrid
+```
+
+#### Exécuter le pipeline Hybride sur tout le dossier :
+```bash
+.venv\Scripts\python.exe main.py --dir "QCM Medicale" --hybrid
 ```
 
 ---

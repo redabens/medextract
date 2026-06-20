@@ -52,8 +52,8 @@ SUB_PROP_REGEX = re.compile(SUB_PROP_PATTERN)
 OPTION_LOOSE_PATTERN = r'^({letter})(?:\s+|[\.\):=-])\s*(.*)'
 
 # Pattern to parse a full line of options, supporting multiple options on a single line (e.g. "A. 1+2  B. 3  C. 4")
-# Now also handles lowercase a-g
-OPTION_PARSE_PATTERN = r'(?:^|\s)([A-Ga-g])(?:[\.\):=-]|\s+(?=\()|(?=\()|\s+(?=\d))\s*(.*?)(?=\s+(?:[A-Ga-g])(?:[\.\):=-]|\s+(?=\()|(?=\()|\s+(?=\d))|$)'
+# Now also handles lowercase a-g and optional spaces before separators (e.g. "A : ")
+OPTION_PARSE_PATTERN = r'(?:^|\s)([A-Ga-g])(?:\s*[\.\):=-]|\s+(?=\()|(?=\()|\s+(?=\d))\s*(.*?)(?=\s+(?:[A-Ga-g])(?:\s*[\.\):=-]|\s+(?=\()|(?=\()|\s+(?=\d))|$)'
 
 # Pattern to match correction lines in final grid/explanations (e.g. "27. BD", "Q 13 - A comment")
 CORR_LINE_PATTERN = r'^(?:[qQ](?:[uU][eE][sS][tT][iI][oO][nN])?\s*)?(\d+)[\s\.:-]+([A-G]{1,7})(?:\s*[\.:-]\s*|\s+|$)(.*)'

@@ -23,6 +23,7 @@ class OptionRefinement(BaseModel):
     is_correct: bool = Field(description="Indique si cette option de réponse finale est exacte (True) ou non (False).")
 
 class QuestionRefinement(BaseModel):
+    q_idx: int = Field(description="Index unique de la question dans le lot fourni.")
     question_number: int = Field(description="Numéro de la question.")
     logic_type: str = Field(description="Sémantique de la consigne: 'POSITIVE' (RJ) ou 'NEGATIVE' (RF - cherche la fausse).")
     question_type: str = Field(description="SINGLE_CHOICE, MULTIPLE_CHOICE, ou K_TYPE.")
@@ -45,6 +46,7 @@ class QuestionSalvageResponse(BaseModel):
     comment: str = Field(description="Commentaire clinique explicatif.")
 
 class PairingItem(BaseModel):
+    q_idx: int = Field(description="Index unique de la question dans la liste fournie.")
     question_number: int = Field(description="Numéro de la question.")
     answer_letter: str = Field(description="Lettre(s) correcte(s) de correction.")
     comment: str = Field(description="Explication/commentaire clinique correspondant à cette question.")
@@ -82,7 +84,8 @@ def _create_salvage_agent() -> Agent:
             "1. Analysez le texte brut fourni contenant une question médicale et ses options de réponses.",
             "2. Séparez proprement l'énoncé de la question (instruction) des options de réponses.",
             "3. Extrayez toutes les options de réponses (A, B, C...) présentes sans contrainte fixe sur le nombre (il peut y en avoir 4, 5 ou plus).",
-            "4. Renseignez la lettre correcte de correction et le commentaire s'ils sont trouvables dans le texte brut."
+            "4. Renseignez la lettre correcte de correction et le commentaire s'ils sont trouvables dans le texte brut.",
+            "5. Si le QCM est combinatoire (les options A, B, C, D, E combinent des affirmations numérotées 1, 2, 3, 4, 5), vous devez extraire les options finales (A, B, C, D, E) comme options. Les affirmations numérotées (1 à 5) doivent être intégrées dans l'énoncé (instruction). N'utilisez JAMAIS de chiffres (1, 2, 3...) comme lettres d'options (letter). Les lettres d'options doivent TOUJOURS être alphabétiques (A, B, C, D, E, etc.)."
         ],
         output_schema=QuestionSalvageResponse,
         markdown=False
@@ -120,15 +123,14 @@ def refine_questions_logic_and_ktype(questions: List[dict], anomalies: Dict[int,
     if anomalies is None:
         anomalies = {}
 
-    # Filter questions: we only refine questions that:
+    # Filter questions by list index: we only refine questions that:
     # 1. are K_TYPE (or have sub-propositions)
     # 2. have anomalies (e.g. LOGIC_MISMATCH, SEQUENCE_GAP, etc.)
     # 3. have an option mismatch vs answer letters
-    to_refine = []
-    for q in questions:
-        q_num = q.get("question_number")
+    to_refine_indices = []
+    for idx, q in enumerate(questions):
         is_ktype = q.get("question_type") == "K_TYPE" or len(q.get("sub_propositions", [])) > 0
-        has_anom = q_num in anomalies
+        has_anom = idx in anomalies
         
         corr = q.get("correction") or {}
         correct_letters_in_corr = set(re.findall(r'[A-G]', corr.get("answer_letter", "").upper()))
@@ -136,25 +138,27 @@ def refine_questions_logic_and_ktype(questions: List[dict], anomalies: Dict[int,
         has_mismatch = (correct_letters_in_corr != correct_letters_in_opts)
 
         if is_ktype or has_anom or has_mismatch:
-            to_refine.append(q)
+            to_refine_indices.append(idx)
 
-    if not to_refine:
+    if not to_refine_indices:
         logger.info("Aucune question ne requiert de raffinage logique ou K-Type.")
         return questions
 
-    logger.info(f"Raffinage logique et K-Type de {len(to_refine)} question(s) sur {len(questions)} via Gemini...")
+    logger.info(f"Raffinage logique et K-Type de {len(to_refine_indices)} question(s) sur {len(questions)} via Gemini...")
     agent = _create_refinement_agent()
     
     # We send questions in small batches to fit context limits and preserve precision
     batch_size = 8
     refined_map = {}
     
-    for idx in range(0, len(to_refine), batch_size):
-        sub_list = to_refine[idx:idx + batch_size]
+    for idx in range(0, len(to_refine_indices), batch_size):
+        sub_indices = to_refine_indices[idx:idx + batch_size]
         # Clean input for LLM to reduce size
         input_data = []
-        for q in sub_list:
+        for q_idx in sub_indices:
+            q = questions[q_idx]
             input_data.append({
+                "q_idx": q_idx,
                 "question_number": q.get("question_number"),
                 "instruction": q.get("instruction"),
                 "question_type": q.get("question_type"),
@@ -187,15 +191,14 @@ def refine_questions_logic_and_ktype(questions: List[dict], anomalies: Dict[int,
                 continue
                 
             for rq in batch_res.questions:
-                refined_map[rq.question_number] = rq
+                refined_map[rq.q_idx] = rq
         except Exception as e:
             logger.error(f"Erreur lors du raffinage du lot {idx // batch_size + 1}: {e}", exc_info=True)
             
     # Apply refinements to original questions list
-    for q in questions:
-        q_num = q.get("question_number")
-        if q_num in refined_map:
-            rq = refined_map[q_num]
+    for idx, q in enumerate(questions):
+        if idx in refined_map:
+            rq = refined_map[idx]
             q["logic_type"] = rq.logic_type
             q["question_type"] = rq.question_type
             
@@ -231,28 +234,30 @@ def salvage_failed_questions(questions: List[dict], anomalies: Dict[int, List[st
     logger.info(f"Rattrapage ciblé de {len(anomalies)} question(s) en anomalie...")
     agent = _create_salvage_agent()
     
-    # Create index mapping
-    q_map = {q.get("question_number"): q for q in questions}
-    
-    for q_num, anomaly_list in anomalies.items():
+    for idx, anomaly_list in anomalies.items():
+        if idx >= len(questions):
+            continue
+            
         # Check if the anomalies require options salvage
         salvage_needed = any(a in ("SEQUENCE_GAP", "EMPTY_OPTION", "NO_OPTIONS") for a in anomaly_list)
         if not salvage_needed:
             continue
             
+        q = questions[idx]
+        q_num = q.get("question_number")
+        
         # Get raw text snippet representing the question
         snippet = raw_text_by_q.get(q_num)
-        if not snippet and q_num in q_map:
-            q_old = q_map[q_num]
-            snippet = q_old.get("_raw_text")
+        if not snippet:
+            snippet = q.get("_raw_text")
             if not snippet:
                 # Fallback snippet built from parsed elements
-                opt_strs = [f"{o['letter']}. {o['text']}" for o in q_old.get("options", [])]
-                snippet = f"Question {q_num}.\n{q_old.get('instruction')}\n" + "\n".join(opt_strs)
-                if q_old.get("correction"):
-                    snippet += f"\nCorrection: {q_old['correction'].get('answer_letter')}\n{q_old['correction'].get('comment')}"
+                opt_strs = [f"{o['letter']}. {o['text']}" for o in q.get("options", [])]
+                snippet = f"Question {q_num}.\n{q.get('instruction')}\n" + "\n".join(opt_strs)
+                if q.get("correction"):
+                    snippet += f"\nCorrection: {q['correction'].get('answer_letter')}\n{q['correction'].get('comment')}"
                 
-        logger.info(f"Appel du salvage agent pour la Question N°{q_num}...")
+        logger.info(f"Appel du salvage agent pour la Question N°{q_num} (index {idx})...")
         prompt = (
             f"Veuillez restructurer proprement cette question médicale en anomalie :\n\n"
             f"TEXTE BRUT ANORMAL :\n{snippet}"
@@ -270,36 +275,41 @@ def salvage_failed_questions(questions: List[dict], anomalies: Dict[int, List[st
             else:
                 continue
                 
-            if q_num in q_map:
-                q = q_map[q_num]
-                q["instruction"] = salvage_res.instruction
-                
-                # Rebuild options
-                new_opts = []
-                for opt in salvage_res.options:
-                    new_opts.append({
-                        "letter": opt.letter.upper(),
-                        "text": opt.text,
-                        "is_correct": opt.is_correct
-                    })
-                q["options"] = new_opts
-                
-                # Check option counts
-                q_opts_len = len(new_opts)
-                if q_opts_len > 1:
-                    q["question_type"] = "MULTIPLE_CHOICE" if any(o["is_correct"] for o in new_opts) else "SINGLE_CHOICE"
-                
-                # Update correction
+            q["instruction"] = salvage_res.instruction
+            
+            # Rebuild options
+            new_opts = []
+            for opt in salvage_res.options:
+                new_opts.append({
+                    "letter": opt.letter.upper(),
+                    "text": opt.text,
+                    "is_correct": opt.is_correct
+                })
+            q["options"] = new_opts
+            
+            # Check option counts
+            q_opts_len = len(new_opts)
+            if q_opts_len > 1:
+                q["question_type"] = "MULTIPLE_CHOICE" if any(o["is_correct"] for o in new_opts) else "SINGLE_CHOICE"
+            
+            # Update correction only if original is empty/Non trouvée, or if the salvage agent found a valid letter
+            orig_corr = q.get("correction", {})
+            orig_ans = orig_corr.get("answer_letter", "").strip()
+            
+            # Check if salvage returned a valid letter (A-G)
+            is_valid_salvage_ans = bool(re.match(r'^[A-G](?:\s*,\s*[A-G])*$', salvage_res.answer_letter.strip().upper()))
+            
+            if is_valid_salvage_ans or not orig_ans or "Non trouv" in orig_ans or orig_ans == "Non prcis":
                 if salvage_res.answer_letter and q.get("correction"):
                     q["correction"]["answer_letter"] = salvage_res.answer_letter
                     if salvage_res.comment:
                         q["correction"]["comment"] = salvage_res.comment
                         
-                logger.info(f"Question N°{q_num} récupérée avec succès ! ({len(new_opts)} option(s) extraite(s))")
+            logger.info(f"Question N°{q_num} (index {idx}) récupérée avec succès ! ({len(new_opts)} option(s) extraite(s))")
         except Exception as e:
             logger.error(f"Erreur de récupération pour la Question N°{q_num}: {e}", exc_info=True)
             
-    return list(q_map.values())
+    return questions
 
 
 def semantic_pair_corrections(questions: List[dict], raw_corrections: List[str]) -> List[dict]:
@@ -314,8 +324,9 @@ def semantic_pair_corrections(questions: List[dict], raw_corrections: List[str])
     agent = _create_pairing_agent()
     
     questions_list = []
-    for q in questions:
+    for idx, q in enumerate(questions):
         questions_list.append({
+            "q_idx": idx,
             "question_number": q.get("question_number"),
             "instruction": q.get("instruction")[:150] + "..." if len(q.get("instruction", "")) > 150 else q.get("instruction")
         })
@@ -346,15 +357,14 @@ def semantic_pair_corrections(questions: List[dict], raw_corrections: List[str])
                 continue
                 
             for item in pair_res.pairings:
-                pairing_map[item.question_number] = item
+                pairing_map[item.q_idx] = item
         except Exception as e:
             logger.error(f"Erreur d'appariement sémantique pour le lot {idx // batch_size + 1}: {e}", exc_info=True)
             
     # Apply paired corrections to original questions
-    for q in questions:
-        q_num = q.get("question_number")
-        if q_num in pairing_map:
-            pair = pairing_map[q_num]
+    for idx, q in enumerate(questions):
+        if idx in pairing_map:
+            pair = pairing_map[idx]
             if not q.get("correction"):
                 q["correction"] = {"answer_letter": "", "comment": "", "correction_images": []}
             q["correction"]["answer_letter"] = pair.answer_letter

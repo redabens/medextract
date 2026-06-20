@@ -25,7 +25,7 @@ def validate_qcm_structure(questions: list) -> tuple[int, list[str], dict[int, l
 
     import re
 
-    for q in questions:
+    for idx, q in enumerate(questions):
         q_num = q.get("question_number", 0)
         src = q.get("source_file", "?")
         q_errors = []
@@ -36,7 +36,7 @@ def validate_qcm_structure(questions: list) -> tuple[int, list[str], dict[int, l
             err_msg = f"Q{q_num} [{src}]: Champs manquants → {missing}"
             errors.append(err_msg)
             q_errors.append("MISSING_FIELDS")
-            anomalies[q_num] = q_errors
+            anomalies[idx] = q_errors
             continue
 
         # 2. Options present
@@ -85,7 +85,7 @@ def validate_qcm_structure(questions: list) -> tuple[int, list[str], dict[int, l
             q_errors.append("KTYPE_MISSING_SUBPROPS")
 
         if q_errors:
-            anomalies[q_num] = q_errors
+            anomalies[idx] = q_errors
         else:
             valid_count += 1
 
